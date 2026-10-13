@@ -1,0 +1,18 @@
+{
+  "header": {
+    "msg_id": "MSG-20260915-000001",
+    "msg_type": "PRE_PLAN",
+    "version": "1.0.0",
+    "src": { "type": "FRONT", "id": "GS-01" },
+    "dst": { "type": "BACKGROUND", "id": "GS-02" }
+  },
+  "payload": {
+    "action": "create_task",
+    "task": {
+      "task_type": "放飞前出任务",
+      "parameters": {
+        "mode": "原地起飞"
+      }
+    }
+  }
+}
