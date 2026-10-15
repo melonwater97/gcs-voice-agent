@@ -1,0 +1,380 @@
+{
+  "before": [
+    {
+      "label": "before",
+      "request": 1,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 64.164,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 137,
+        "total_tokens": 1781,
+        "input_tokens": 1644,
+        "output_tokens": 137,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 4.21,
+        "total_time": 6.73,
+        "prompt_eval_duration": 4.21,
+        "generation_duration": 2.52,
+        "prompt_tokens_per_second": 390.53,
+        "generation_tokens_per_second": 54.41
+      }
+    },
+    {
+      "label": "before",
+      "request": 2,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 6.755,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 137,
+        "total_tokens": 1781,
+        "input_tokens": 1644,
+        "output_tokens": 137,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 4.23,
+        "total_time": 6.74,
+        "prompt_eval_duration": 4.23,
+        "generation_duration": 2.52,
+        "prompt_tokens_per_second": 388.75,
+        "generation_tokens_per_second": 54.45
+      }
+    }
+  ],
+  "after": [
+    {
+      "label": "after",
+      "request": 1,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 24.647,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 137,
+        "total_tokens": 1781,
+        "input_tokens": 1644,
+        "output_tokens": 137,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "model_load_duration": 14.04,
+        "time_to_first_token": 7.16,
+        "total_time": 10.55,
+        "prompt_eval_duration": 7.16,
+        "generation_duration": 3.39,
+        "prompt_tokens_per_second": 229.7,
+        "generation_tokens_per_second": 40.43
+      }
+    },
+    {
+      "label": "after",
+      "request": 2,
+      "text": "新增C型编队飞行任务",
+      "wall_s": 7.339,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 102,
+        "total_tokens": 1743,
+        "input_tokens": 1641,
+        "output_tokens": 102,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 4.89,
+        "total_time": 7.33,
+        "prompt_eval_duration": 4.89,
+        "generation_duration": 2.44,
+        "prompt_tokens_per_second": 335.27,
+        "generation_tokens_per_second": 41.88
+      }
+    },
+    {
+      "label": "after",
+      "request": 3,
+      "text": "新增U型编队飞行任务",
+      "wall_s": 6.374,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 102,
+        "total_tokens": 1743,
+        "input_tokens": 1641,
+        "output_tokens": 102,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 4.18,
+        "total_time": 6.36,
+        "prompt_eval_duration": 4.18,
+        "generation_duration": 2.18,
+        "prompt_tokens_per_second": 392.18,
+        "generation_tokens_per_second": 46.79
+      }
+    },
+    {
+      "label": "after",
+      "request": 4,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 7.454,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 137,
+        "total_tokens": 1781,
+        "input_tokens": 1644,
+        "output_tokens": 137,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 4.48,
+        "total_time": 7.45,
+        "prompt_eval_duration": 4.48,
+        "generation_duration": 2.97,
+        "prompt_tokens_per_second": 367.29,
+        "generation_tokens_per_second": 46.14
+      }
+    }
+  ],
+  "after512": [
+    {
+      "label": "after512",
+      "request": 1,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 22.243,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 113,
+        "total_tokens": 1757,
+        "input_tokens": 1644,
+        "output_tokens": 113,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "model_load_duration": 12.52,
+        "time_to_first_token": 7.21,
+        "total_time": 9.67,
+        "prompt_eval_duration": 7.21,
+        "generation_duration": 2.45,
+        "prompt_tokens_per_second": 227.91,
+        "generation_tokens_per_second": 46.08
+      }
+    },
+    {
+      "label": "after512",
+      "request": 2,
+      "text": "新增C型编队飞行任务",
+      "wall_s": 8.171,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 117,
+        "total_tokens": 1758,
+        "input_tokens": 1641,
+        "output_tokens": 117,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "time_to_first_token": 5.65,
+        "total_time": 8.16,
+        "prompt_eval_duration": 5.65,
+        "generation_duration": 2.51,
+        "prompt_tokens_per_second": 290.39,
+        "generation_tokens_per_second": 46.63
+      }
+    },
+    {
+      "label": "after512",
+      "request": 3,
+      "text": "新增U型编队飞行任务",
+      "wall_s": 3.173,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 102,
+        "total_tokens": 1743,
+        "input_tokens": 1641,
+        "output_tokens": 102,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 0.99,
+        "total_time": 3.16,
+        "prompt_eval_duration": 0.99,
+        "generation_duration": 2.17,
+        "prompt_tokens_per_second": 1655.24,
+        "generation_tokens_per_second": 46.95
+      }
+    },
+    {
+      "label": "after512",
+      "request": 4,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 3.437,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 113,
+        "total_tokens": 1757,
+        "input_tokens": 1644,
+        "output_tokens": 113,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 1.01,
+        "total_time": 3.43,
+        "prompt_eval_duration": 1.01,
+        "generation_duration": 2.42,
+        "prompt_tokens_per_second": 1633.96,
+        "generation_tokens_per_second": 46.65
+      }
+    }
+  ],
+  "validation": [
+    {
+      "label": "validation",
+      "request": 1,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 3.194,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 113,
+        "total_tokens": 1757,
+        "input_tokens": 1644,
+        "output_tokens": 113,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 0.94,
+        "total_time": 3.18,
+        "prompt_eval_duration": 0.94,
+        "generation_duration": 2.24,
+        "prompt_tokens_per_second": 1749.21,
+        "generation_tokens_per_second": 50.42
+      }
+    },
+    {
+      "label": "validation",
+      "request": 2,
+      "text": "新增放飞前出任务，在指定位置展开，位置为东经120.1度、北纬30.2度",
+      "wall_s": 4.877,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1662,
+        "completion_tokens": 191,
+        "total_tokens": 1853,
+        "input_tokens": 1662,
+        "output_tokens": 191,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 1.01,
+        "total_time": 4.87,
+        "prompt_eval_duration": 1.01,
+        "generation_duration": 3.86,
+        "prompt_tokens_per_second": 1652.42,
+        "generation_tokens_per_second": 49.49
+      }
+    },
+    {
+      "label": "validation",
+      "request": 3,
+      "text": "新增放飞前出任务，在指定区域展开，区域顶点为120.1,30.2；120.2,30.2；120.2,30.3",
+      "wall_s": 8.289,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1680,
+        "completion_tokens": 342,
+        "total_tokens": 2022,
+        "input_tokens": 1680,
+        "output_tokens": 342,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 1.06,
+        "total_time": 8.28,
+        "prompt_eval_duration": 1.06,
+        "generation_duration": 7.22,
+        "prompt_tokens_per_second": 1579.82,
+        "generation_tokens_per_second": 47.39
+      }
+    },
+    {
+      "label": "validation",
+      "request": 4,
+      "text": "新增C型编队飞行任务",
+      "wall_s": 3.253,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 117,
+        "total_tokens": 1758,
+        "input_tokens": 1641,
+        "output_tokens": 117,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 0.91,
+        "total_time": 3.25,
+        "prompt_eval_duration": 0.91,
+        "generation_duration": 2.34,
+        "prompt_tokens_per_second": 1803.36,
+        "generation_tokens_per_second": 50.1
+      }
+    },
+    {
+      "label": "validation",
+      "request": 5,
+      "text": "新增U型编队飞行任务",
+      "wall_s": 3.161,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1641,
+        "completion_tokens": 102,
+        "total_tokens": 1743,
+        "input_tokens": 1641,
+        "output_tokens": 102,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 0.93,
+        "total_time": 3.15,
+        "prompt_eval_duration": 0.93,
+        "generation_duration": 2.22,
+        "prompt_tokens_per_second": 1765.87,
+        "generation_tokens_per_second": 45.88
+      }
+    },
+    {
+      "label": "validation",
+      "request": 6,
+      "text": "新增放飞前出任务，模式为原地起飞",
+      "wall_s": 3.201,
+      "correct_tool_call": true,
+      "usage": {
+        "prompt_tokens": 1644,
+        "completion_tokens": 113,
+        "total_tokens": 1757,
+        "input_tokens": 1644,
+        "output_tokens": 113,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536
+        },
+        "time_to_first_token": 0.94,
+        "total_time": 3.19,
+        "prompt_eval_duration": 0.94,
+        "generation_duration": 2.26,
+        "prompt_tokens_per_second": 1757.05,
+        "generation_tokens_per_second": 50.09
+      }
+    }
+  ]
+}

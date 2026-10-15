@@ -3,5 +3,11 @@ models/
 __pycache__/
 *.wav
 !sample.wav
-cankao/
+docs/cankao/
 .DS_Store
+output/
+.idea/
+.vscode/
+~$*
+*.dtmp
+*.bkp
