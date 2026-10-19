@@ -1,17 +1,20 @@
 {
   "header": {
-    "msg_id": "MSG-20260915-000001",
-    "msg_type": "PRE_PLAN",
+    "msg_id": "MSG-550e8400-e29b-41d4-a716-446655440000",
+    "msg_type": "AGENT_OUTPUT",
     "version": "1.0.0",
     "src": { "type": "FRONT", "id": "GS-01" },
     "dst": { "type": "BACKGROUND", "id": "GS-02" }
   },
   "payload": {
-    "action": "create_task",
+    "action": "upload_task",
+    "task_id": "TASK-00000000000000000000000000000000",
     "task": {
       "task_type": "放飞前出任务",
+      "task_name": "晨曦",
       "parameters": {
-        "mode": "原地起飞"
+        "mode": "原地起飞",
+        "takeoff_altitude": 50
       }
     }
   }

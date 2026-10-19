@@ -4,7 +4,7 @@ import json
 from contextlib import aclosing
 
 from shared.config import AssistantConfig
-from shared.contracts import describe_task
+from shared.contracts import describe_task, result_task
 from inputs.sources import input_texts
 from inference.models import DeepSeekModel, LocalModel, ProposalModel
 from inference.prompts import SYSTEM_PROMPT
@@ -41,6 +41,8 @@ class Assistant:
         self.history: list[list[dict]] = []  # 每轮一组：user + assistant (+ tool)
         self.last_task: str | None = None    # 最近一次成功任务的可读描述
         self.pending: str | None = None      # 待补全的澄清目标
+        self.last_events: list[dict] = []    # 最近一轮口令的结构化事件，供 Web 服务展示
+        self.known_tasks: dict[str, dict] = {}  # 保留名称与编号映射，不受对话滑窗影响
 
     async def prepare(self) -> None:
         discovered = await self.gateway.discover()
@@ -53,12 +55,15 @@ class Assistant:
         log("L3", "发现 MCP 工具：" + ", ".join(sorted(self.allowed)))
 
     def _state_messages(self) -> list[dict]:
-        if self.last_task is None and self.pending is None:
+        if self.last_task is None and self.pending is None and not self.known_tasks:
             return []
         lines = ["当前会话任务状态：",
                  f"- 上一个任务：{self.last_task}" if self.last_task else "- 尚未创建任务"]
         if self.pending:
             lines.append(f"- 待补全：{self.pending}")
+        if self.known_tasks:
+            lines.append("任务目录（同名有多个时先澄清，工具仍使用 task_id）：")
+            lines.append(json.dumps(list(self.known_tasks.values()), ensure_ascii=False))
         return [{"role": "system", "content": "\n".join(lines)}]
 
     def _build_messages(self, text: str) -> list[dict]:
@@ -88,6 +93,7 @@ class Assistant:
 
     async def process_text(self, text: str) -> dict | None:
         text = text.strip()
+        self.last_events = []
         if not text:
             log("输入", "没有识别到文本，请重试")
             return None
@@ -103,9 +109,24 @@ class Assistant:
             if invocation is None:
                 log("L2", "无工具调用，结束：" + (message.get("content") or "需要澄清"))
                 self.pending = (message.get("content") or "待补全")[:PENDING_MAX_CHARS]
+                self.last_events.append({"type": "clarify", "text": self.pending})
                 return None
+            if invocation.spec.name in {"upload_task", "execute_task"}:
+                task_id = invocation.arguments.task_id
+                selected = self.known_tasks.get(task_id)
+                name = selected.get("task_name") if selected else None
+                matches = [task for task in self.known_tasks.values()
+                           if name and task["task_name"] == name]
+                if name and name in text and len(matches) > 1 and task_id not in text:
+                    self.pending = f"有多个名为「{name}」的任务，请明确任务编号。"
+                    self.last_events.append({"type": "clarify", "text": self.pending})
+                    self._remember_tool_outcome("未调用工具：" + self.pending)
+                    log("L2", self.pending)
+                    return None
             arguments = invocation.arguments.model_dump()
             log("L2", "工具白名单与参数校验通过")
+            self.last_events.append({"type": "tool_call",
+                                     "name": invocation.spec.name, "arguments": arguments})
             log("L3", f"MCP call_tool: {invocation.spec.name} "
                 + json.dumps(arguments, ensure_ascii=False))
             result = await self.gateway.call(invocation.spec.name, arguments)
@@ -116,9 +137,18 @@ class Assistant:
         log("L3", "MCP 返回：" + json.dumps(result, ensure_ascii=False))
         log("结果", invocation.spec.describe_result(validated))
         self._remember_tool_outcome(json.dumps(result, ensure_ascii=False))
-        payload = getattr(invocation.arguments, "payload", None)
-        summary = describe_task(payload) if payload is not None else invocation.spec.name
-        self.last_task = f"{validated.task_id}：{summary}"
+        task = result_task(validated)
+        if task is not None:
+            self.known_tasks[validated.task_id] = {
+                "task_id": validated.task_id, "task_name": task.task_name,
+                "status": validated.status,
+            }
+        elif validated.task_id in self.known_tasks:
+            self.known_tasks[validated.task_id]["status"] = validated.status
+        summary = describe_task(task) if task is not None else invocation.spec.name
+        self.last_task = f"{validated.task_id}（{validated.status}）：{summary}"
+        self.last_events.append({"type": "task_result", "tool": invocation.spec.name,
+                                 **validated.model_dump()})
         self.pending = None
         return validated.model_dump()
 
@@ -132,7 +162,7 @@ async def run(config: AssistantConfig) -> None:
     else:
         log("L1", f"本地 oMLX 模型：{config.model}")
         model = LocalModel(config.model, config.url)
-    log("地面站", config.gcs_url)
+    log("任务存储", str(config.task_output_dir))
     async with MCPSession(config) as gateway:
         assistant = Assistant(model, gateway)
         await assistant.prepare()

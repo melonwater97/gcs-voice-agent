@@ -21,7 +21,8 @@ async def input_texts(args: AssistantConfig):
     from . import speech
 
     log("ASR", "加载本地 Paraformer；本次会话只加载一次")
-    asr_model = await asyncio.to_thread(speech.load_model, args.asr_model_dir)
+    asr_model = await asyncio.to_thread(speech.load_model, args.asr_model_dir,
+                                      args.asr_hotwords_file)
     if args.file is not None:
         text = await asyncio.to_thread(speech.transcribe_file, asr_model, args.file)
         log("ASR", "转写：" + text)

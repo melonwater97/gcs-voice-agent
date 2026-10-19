@@ -1,4 +1,4 @@
-"""Project entry point: python main.py assistant|gcs|mcp."""
+"""Project entry point: python main.py assistant|web|mcp."""
 
 from cli import main
 

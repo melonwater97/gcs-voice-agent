@@ -5,12 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-INTERFACE_FILE = PROJECT_DIR / "接口.json"
-MODEL_DIR = PROJECT_DIR / "models" / "paraformer-large"
+MODEL_DIR = PROJECT_DIR / "models" / "seaco-paraformer"
+ASR_HOTWORDS_FILE = PROJECT_DIR / "config" / "asr_hotwords.txt"
 OUTPUT_DIR = PROJECT_DIR / "output"
 DEFAULT_MODEL = "Ornith-1.5-35B-A3B-MLX-6bit"
 DEFAULT_URL = "http://127.0.0.1:18000/v1/chat/completions"
-DEFAULT_GCS_URL = "http://127.0.0.1:18001"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 # DeepSeek Key 通过环境变量 DEEPSEEK_API_KEY 注入；不要把 Key 写入此文件提交。
@@ -26,9 +25,9 @@ class AssistantConfig:
     api_key: str | None = DEEPSEEK_API_KEY
     model: str = DEFAULT_MODEL
     url: str = DEFAULT_URL
-    gcs_url: str = DEFAULT_GCS_URL
     asr_model_dir: Path = MODEL_DIR
-    interface_file: Path = INTERFACE_FILE
+    asr_hotwords_file: Path = ASR_HOTWORDS_FILE
+    task_output_dir: Path = OUTPUT_DIR
 
     def __post_init__(self):
         if sum((self.text is not None, self.file is not None, self.mic)) > 1:

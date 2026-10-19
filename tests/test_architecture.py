@@ -17,12 +17,12 @@ from pydantic import BaseModel, ConfigDict
 from assistant.tools import DEFAULT_TOOLS, ToolRegistry, ToolSpec
 from assistant.workflow import HISTORY_ROUNDS, Assistant, run
 from shared.config import (AssistantConfig, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
-                           DEEPSEEK_URL, PROJECT_DIR, INTERFACE_FILE)
+                           DEEPSEEK_URL, PROJECT_DIR)
 from inference.models import DeepSeekModel, LocalModel
 from inference.prompts import SYSTEM_PROMPT
 from inputs.sources import input_texts
-from tests.test_workflow import (VALID, EXAMPLE, formation, message, openai_stub,
-                                 receiving_gcs, stub_local)
+from tests.test_workflow import (VALID, EXAMPLE, VARIANTS, pre_launch, message,
+                                 openai_stub, stub_local)
 
 
 class InjectedModel:
@@ -95,7 +95,7 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_proposal_does_not_reach_gateway(self):
         model = InjectedModel(message(VALID, "unregistered"))
-        gateway = InjectedGateway(["create_task", "unregistered"])
+        gateway = InjectedGateway(["create_task", "upload_task", "execute_task", "unregistered"])
         assistant = Assistant(model, gateway)
         with redirect_stdout(StringIO()):
             await assistant.prepare()
@@ -111,37 +111,36 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(model.received_tools)
 
     async def test_multi_turn_context_history_state_and_pending(self):
-        template = json.loads(INTERFACE_FILE.read_text())
-        template["payload"] = formation("C型")
-        gateway = InjectedGateway(["create_task"],
-            {"status": "created", "task_id": "TASK-1", "message": template, "file": "test.json"})
+        gateway = InjectedGateway(["create_task", "upload_task", "execute_task"],
+            {"status": "draft", "task_id": "TASK-1", "task": VALID["task"]})
         assistant = Assistant(ScriptedModel([
-            {"content": "请问需要C型还是U型编队？"},          # 第一轮：澄清，缺参
-            message(formation("C型")),                        # 第二轮：用户补参后调用
+            {"content": "请问起飞高度是多少？"},          # 第一轮：澄清，缺参
+            message(VALID),                               # 第二轮：用户补参后调用
         ]), gateway)
         with redirect_stdout(StringIO()):
             await assistant.prepare()
-            self.assertIsNone(await assistant.process_text("新增编队飞行任务"))
-            self.assertEqual(assistant.pending, "请问需要C型还是U型编队？")
-            result = await assistant.process_text("C型")
+            self.assertIsNone(await assistant.process_text("新增原地起飞任务"))
+            self.assertEqual(assistant.pending, "请问起飞高度是多少？")
+            result = await assistant.process_text("起飞高度50米")
         self.assertEqual(result["task_id"], "TASK-1")
         self.assertIsNone(assistant.pending)
         self.assertIn("TASK-1", assistant.last_task)
-        self.assertIn("编队飞行任务", assistant.last_task)
+        self.assertIn("draft", assistant.last_task)
+        self.assertIn("原地起飞", assistant.last_task)
         second = assistant.model.received[1]
         self.assertEqual(len(second), 6)
         self.assertEqual(second[0]["content"], SYSTEM_PROMPT)
         self.assertIn("待补全", second[1]["content"])
-        self.assertEqual(second[2], {"role": "user", "content": "新增编队飞行任务"})
-        self.assertEqual(second[3], {"role": "assistant", "content": "请问需要C型还是U型编队？"})
+        self.assertEqual(second[2], {"role": "user", "content": "新增原地起飞任务"})
+        self.assertEqual(second[3], {"role": "assistant", "content": "请问起飞高度是多少？"})
         self.assertEqual(second[4]["role"], "system")
         self.assertIn("待补全", second[4]["content"])
-        self.assertEqual(second[5], {"role": "user", "content": "C型"})
+        self.assertEqual(second[5], {"role": "user", "content": "起飞高度50米"})
         self.assertEqual(assistant.history[-1][-1]["role"], "tool")
 
     async def test_history_window_keeps_recent_rounds_only(self):
         assistant = Assistant(ScriptedModel([{"content": f"澄清{i}"} for i in range(6)]),
-                              InjectedGateway(["create_task"]))
+                              InjectedGateway(["create_task", "upload_task", "execute_task"]))
         with redirect_stdout(StringIO()):
             await assistant.prepare()
             for index in range(6):
@@ -155,16 +154,15 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sent), 1 + 1 + HISTORY_ROUNDS * 2 + 1 + 1)
 
     async def test_mismatched_result_is_not_reported_as_success(self):
-        template = json.loads(INTERFACE_FILE.read_text())
-        template["payload"] = formation("U型")
-        gateway = InjectedGateway(["create_task"], {"status": "created", "task_id": "TASK-1",
-                                                  "message": template, "file": "test.json"})
+        mismatched = pre_launch("原地起飞", takeoff_altitude=99)
+        gateway = InjectedGateway(["create_task", "upload_task", "execute_task"],
+                                  {"status": "draft", "task_id": "TASK-1", "task": mismatched["task"]})
         assistant = Assistant(InjectedModel(message(VALID)), gateway)
         with redirect_stdout(StringIO()) as output:
             await assistant.prepare()
             with self.assertRaisesRegex(ValueError, "不一致"):
                 await assistant.process_text(EXAMPLE)
-        self.assertNotIn("已新增", output.getvalue())
+        self.assertNotIn("已创建", output.getvalue())
 
     async def test_local_model_sends_discovered_schema_and_returns_message(self):
         tools = [{"type": "function", "function": {"name": "create_task", "parameters": {}}}]
@@ -227,20 +225,36 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
             cwd=PROJECT_DIR, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    async def test_custom_interface_is_forwarded_to_mcp_without_modification(self):
-        with tempfile.TemporaryDirectory() as directory, receiving_gcs(directory) as (url, _):
-            template = json.loads(INTERFACE_FILE.read_text())
-            template["header"]["src"]["id"] = "custom-source"
-            path = Path(directory) / "interface.json"
-            path.write_text(json.dumps(template))
-            original = path.read_bytes()
-            with patch("assistant.workflow.LocalModel", stub_local(message(VALID))), \
-                 redirect_stdout(StringIO()):
-                await run(AssistantConfig(gcs_url=url, interface_file=path))
+    async def test_custom_task_output_directory_is_forwarded_to_mcp(self):
+        class CreateThenUpload:
+            """第一轮创建任务，第二轮从历史工具结果中提取任务编号并上传。"""
+
+            def __init__(self):
+                self.rounds = 0
+
+            async def propose(self, messages, tools):
+                self.rounds += 1
+                if self.rounds == 1:
+                    return message(VALID)
+                tool = next(m for m in messages if m.get("role") == "tool")
+                task_id = json.loads(tool["content"])["task_id"]
+                return {"tool_calls": [{"function": {
+                    "name": "upload_task",
+                    "arguments": json.dumps({"task_id": task_id})}}]}
+
+        async def two_texts(config):
+            yield "新增原地起飞任务，起飞高度50米"
+            yield "上传任务"
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("assistant.workflow.LocalModel", lambda *a, **k: CreateThenUpload()), \
+                 patch("assistant.workflow.input_texts", two_texts), \
+                 redirect_stdout(StringIO()) as output:
+                await run(AssistantConfig(task_output_dir=Path(directory)))
+            self.assertIn("已保存并模拟上传放飞前出任务", output.getvalue())
             files = list(Path(directory).glob("TASK-*.json"))
             self.assertEqual(len(files), 1)
-            self.assertEqual(json.loads(files[0].read_text())["header"]["src"]["id"], "custom-source")
-            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(json.loads(files[0].read_text())["task"], VALID["task"])
 
     async def test_cancel_during_inference_closes_suspended_input(self):
         closed = asyncio.Event()
@@ -253,7 +267,7 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
 
         class Session:
             async def __aenter__(self):
-                return InjectedGateway(["create_task"])
+                return InjectedGateway(["create_task", "upload_task", "execute_task"])
 
             async def __aexit__(self, *exc):
                 return False
@@ -279,31 +293,15 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
 
 class CLITests(unittest.TestCase):
     def test_cli_entrypoint_dispatch(self):
-        with tempfile.TemporaryDirectory() as directory, receiving_gcs(directory) as (url, _), \
+        with tempfile.TemporaryDirectory() as directory, \
                 openai_stub(message(VALID)) as model_url:
             result = subprocess.run([sys.executable, str(PROJECT_DIR / "main.py"), "assistant",
-                "--gcs-url", url, "--url", model_url, EXAMPLE], cwd=PROJECT_DIR,
+                "--task-output-dir", directory, "--url", model_url, EXAMPLE], cwd=directory,
                 capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("已新增放飞前出任务", result.stdout)
-            self.assertEqual(len(list(Path(directory).glob("TASK-*.json"))), 1)
-
-    def test_gcs_command_starts_independent_http_service(self):
-        with tempfile.TemporaryDirectory() as directory:
-            process = subprocess.Popen([sys.executable, str(PROJECT_DIR / "main.py"), "gcs",
-                "--port", "0", "--output-dir", directory], cwd=PROJECT_DIR,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                line = process.stdout.readline()
-                url = line.split("：", 1)[1].split("；", 1)[0]
-                with httpx.Client(trust_env=False, timeout=5) as client:
-                    self.assertEqual(client.get(url + "/health").json()["status"], "ok")
-                    response = client.post(url + "/tasks", json=json.loads(INTERFACE_FILE.read_text()))
-                    self.assertEqual(response.status_code, 201)
-                self.assertEqual(len(list(Path(directory).glob("TASK-*.json"))), 1)
-            finally:
-                process.terminate()
-                process.communicate(timeout=5)
+            self.assertIn("已创建放飞前出任务", result.stdout)
+            # 阶段一仅创建草稿，地面站不产生任务文件
+            self.assertEqual(list(Path(directory).glob("TASK-*.json")), [])
 
     def test_cli_rejects_conflicting_input_before_starting_mcp(self):
         result = subprocess.run([sys.executable, str(PROJECT_DIR / "main.py"), "assistant",

@@ -1,4 +1,4 @@
-"""Verify five task variants, real MCP dispatch, and rejection without writes."""
+"""Verify task variants, three-stage MCP dispatch, and rejection without writes."""
 
 import asyncio
 import json
@@ -18,66 +18,70 @@ import httpx
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
-from simulator.backend import SimulatedGCS
-from shared.contracts import CreateTaskPayload, INTERFACE_FILE
+from simulator.backend import TaskStore
 from shared.config import PROJECT_DIR, AssistantConfig
+from shared.contracts import PreLaunchTask, Message
+from shared.messages import AGENT, MCP, make_message
 from inputs.sources import input_texts
 from assistant.workflow import run
 from assistant.tools import DEFAULT_TOOLS
-from simulator.http_server import GCSHTTPServer
-from integrations.gcs_http import GCSHTTPClient, build_message
 from shared.config import DEFAULT_MODEL, DEFAULT_URL
 
 
 def pre_launch(mode: str, **parameters) -> dict:
     return {"action": "create_task", "task": {
-        "task_type": "放飞前出任务", "parameters": {"mode": mode, **parameters},
+        "task_type": "放飞前出任务", "task_name": "晨曦", "parameters": {"mode": mode, **parameters},
     }}
 
 
-def formation(kind: str) -> dict:
-    return {"action": "create_task", "task": {
-        "task_type": "编队飞行任务", "parameters": {"formation_type": kind},
-    }}
+def c_formation(**overrides) -> dict:
+    parameters = {"formation_type": "C型", "open_angle": 90, "radius": 100,
+                  "position": {"longitude": 120.1, "latitude": 30.2}}
+    return {**parameters, **overrides}
 
 
-EXAMPLE = "新增放飞前出任务，模式为原地起飞"
-VALID = pre_launch("原地起飞")
+def u_formation(**overrides) -> dict:
+    parameters = {"formation_type": "U型", "formation_length": 200, "formation_width": 80,
+                  "position": {"longitude": 120.1, "latitude": 30.2}}
+    return {**parameters, **overrides}
+
+
+EXAMPLE = "新增放飞前出任务，原地起飞，起飞高度50米"
+VALID = pre_launch("原地起飞", takeoff_altitude=50)
 VARIANTS = [
-    pre_launch("原地起飞"),
-    pre_launch("在指定位置展开", position={"longitude": 120.1, "latitude": 30.2}),
-    pre_launch("在指定区域展开", area={"vertices": [
-        {"longitude": 120.1, "latitude": 30.2},
-        {"longitude": 120.2, "latitude": 30.2},
-        {"longitude": 120.2, "latitude": 30.3},
-    ]}),
-    formation("C型"),
-    formation("U型"),
+    VALID,
+    pre_launch("在指定位置展开", takeoff_altitude=50, formation=c_formation()),
+    pre_launch("在指定位置展开", takeoff_altitude=80, formation=u_formation()),
 ]
 INVALID_PAYLOADS = [
-    pre_launch("未知模式"),
-    pre_launch("在指定位置展开"),
-    pre_launch("在指定位置展开", position={"longitude": 181.0, "latitude": 30.0}),
-    pre_launch("在指定区域展开", area={"vertices": [
-        {"longitude": 120.0, "latitude": 30.0},
-        {"longitude": 121.0, "latitude": 30.0},
-    ]}),
-    pre_launch("在指定区域展开", area={"vertices": [
-        {"longitude": 120.0, "latitude": 30.0},
-        {"longitude": 120.0, "latitude": 30.0},
-        {"longitude": 121.0, "latitude": 31.0},
-    ]}),
-    pre_launch("原地起飞", formation_type="C型"),
-    formation("V型"),
-    {"action": "create_task", "task": {"task_type": "编队飞行任务", "parameters": {}}},
+    pre_launch("原地起飞"),                                                   # 缺起飞高度
+    pre_launch("原地起飞", takeoff_altitude=0),                               # 高度必须为正
+    pre_launch("在指定位置展开", takeoff_altitude=50),                        # 缺编队参数
+    pre_launch("在指定位置展开", takeoff_altitude=50,
+               formation=c_formation(open_angle=0)),                          # 角度必须为正
+    pre_launch("在指定位置展开", takeoff_altitude=50,
+               formation=c_formation(position={"longitude": 181.0, "latitude": 30.0})),  # 经度越界
+    pre_launch("在指定位置展开", takeoff_altitude=50,
+               formation=u_formation(formation_width=0)),                     # 宽度必须为正
+    pre_launch("在指定位置展开", takeoff_altitude=50,
+               formation={"formation_type": "V型"}),                          # 未知编队类型
+    pre_launch("在指定区域展开"),                                              # 未知模式
+    {"action": "create_task", "task": {"task_type": "编队飞行任务", "parameters": {}}},  # 已并入放飞前出任务
     {"action": "create_task", "task": {"task_type": "未知任务", "parameters": {}}},
-    {**VARIANTS[0], "action": "start_flight"},
+    {**VALID, "action": "start_flight"},                                      # 未知动作
 ]
+PLACEHOLDER_ID = "TASK-" + "0" * 32
 
 
 def message(payload: dict, name: str = "create_task") -> dict:
     return {"tool_calls": [{"function": {
         "name": name, "arguments": json.dumps({"payload": payload}, ensure_ascii=False),
+    }}]}
+
+
+def upload_call(task_id: str) -> dict:
+    return {"tool_calls": [{"function": {
+        "name": "upload_task", "arguments": json.dumps({"task_id": task_id}),
     }}]}
 
 
@@ -97,19 +101,6 @@ def stub_local(reply: dict):
             return self.reply
 
     return StubLocalModel
-
-
-@contextmanager
-def receiving_gcs(directory: str):
-    server = GCSHTTPServer(("127.0.0.1", 0), Path(directory), quiet=True)
-    worker = threading.Thread(target=server.serve_forever, daemon=True)
-    worker.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", server
-    finally:
-        server.shutdown()
-        server.server_close()
-        worker.join(timeout=2)
 
 
 @contextmanager
@@ -142,135 +133,164 @@ def openai_stub(reply: dict):
         worker.join(timeout=2)
 
 
-def workflow_args(url: str, **overrides) -> AssistantConfig:
+def workflow_args(directory: Path, **overrides) -> AssistantConfig:
     return AssistantConfig(**{
         "text": None, "file": None, "mic": False,
-        "model": DEFAULT_MODEL, "url": DEFAULT_URL, "gcs_url": url,
+        "model": DEFAULT_MODEL, "url": DEFAULT_URL, "task_output_dir": Path(directory),
         "asr_model_dir": PROJECT_DIR / "models" / "paraformer-large",
         **overrides,
     })
 
 
 class DemoTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mcp_dispatch_five_variants_and_refusal(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-layers-test-") as directory, receiving_gcs(directory) as (url, _):
+    async def test_mcp_dispatch_three_stages_and_refusal(self):
+        with tempfile.TemporaryDirectory(prefix="gcs-layers-test-") as directory:
             params = StdioServerParameters(command=sys.executable, args=["-m", "integrations.mcp_server"], cwd=str(PROJECT_DIR),
-                env={**os.environ, "GCS_HTTP_URL": url})
+                env={**os.environ, "TASK_OUTPUT_DIR": directory})
             async with Client(params) as client:
                 tools = {tool.name for tool in (await client.list_tools()).tools}
-                self.assertEqual(tools, {"create_task"})
+                self.assertEqual(tools, {"create_task", "upload_task", "execute_task"})
+                async def call(name, payload):
+                    request = make_message(name.upper(), payload, src=AGENT, dst=MCP)
+                    result = await client.call_tool(name, request)
+                    if not result.is_error:
+                        body = Message[dict].model_validate(result.structured_content)
+                        self.assertEqual(body.header.ref_msg_id, request["header"]["msg_id"])
+                        self.assertEqual(body.header.src.model_dump(), MCP)
+                        self.assertEqual(body.header.dst.model_dump(), AGENT)
+                    return result
+
+                self.assertTrue((await client.call_tool("create_task", {"payload": VALID})).is_error)
+                bad_route = make_message("CREATE_TASK", VALID, src=AGENT, dst=AGENT)
+                rejected = await client.call_tool("create_task", bad_route)
+                self.assertEqual(rejected.structured_content["header"]["msg_type"], "ERROR")
+                self.assertEqual(rejected.structured_content["header"]["src"], MCP)
                 for payload in INVALID_PAYLOADS:
-                    result = await client.call_tool("create_task", {"payload": payload})
+                    result = await call("create_task", payload)
                     self.assertTrue(result.is_error)
                 self.assertTrue((await client.call_tool("start_flight", {})).is_error)
+                self.assertEqual((await call("upload_task", {"task_id": "TASK-0"})).structured_content["header"]["msg_type"], "ERROR")
                 self.assertEqual(list(Path(directory).iterdir()), [])
-                original_interface = INTERFACE_FILE.read_bytes()
                 task_ids = set()
                 for payload in VARIANTS:
                     with self.subTest(payload=payload):
                         command = validate_call(message(payload), tools)
                         self.assertEqual(command.payload.model_dump(), payload)
-                        result = await client.call_tool("create_task", command.model_dump())
-                        self.assertFalse(result.is_error)
-                        task = result.structured_content
-                        self.assertEqual(task["status"], "created")
-                        self.assertEqual(task["message"]["payload"], payload)
-                        self.assertEqual(json.loads(Path(task["file"]).read_text()), task["message"])
-                        template_header = json.loads(original_interface)["header"]
-                        actual_header = task["message"]["header"]
-                        self.assertNotEqual(actual_header["msg_id"], template_header["msg_id"])
-                        self.assertEqual({k: v for k, v in actual_header.items() if k != "msg_id"},
-                                         {k: v for k, v in template_header.items() if k != "msg_id"})
-                        task_ids.add(task["task_id"])
-                self.assertEqual(len(task_ids), 5)
-                self.assertEqual(len(list(Path(directory).glob("*.json"))), 5)
-                self.assertEqual(INTERFACE_FILE.read_bytes(), original_interface)
+                        created = await call("create_task", command.payload.model_dump())
+                        self.assertFalse(created.is_error)
+                        draft = created.structured_content["payload"]
+                        self.assertEqual(draft["status"], "draft")
+                        self.assertEqual(draft["task"], payload["task"])
+                        task_id = draft["task_id"]
+                        # 未上传不能执行
+                        self.assertEqual((await call(
+                            "execute_task", {"task_id": task_id})).structured_content["header"]["msg_type"], "ERROR")
+                        uploaded = await call("upload_task", {"task_id": task_id})
+                        self.assertFalse(uploaded.is_error)
+                        result = uploaded.structured_content["payload"]
+                        self.assertEqual(result["status"], "uploaded")
+                        self.assertEqual(result["task"], payload["task"])
+                        self.assertEqual(json.loads(Path(result["file"]).read_text()),
+                                         result)
+                        executed = await call("execute_task", {"task_id": task_id})
+                        self.assertEqual(executed.structured_content["payload"],
+                                         {"task_id": task_id, "status": "executing"})
+                        task_ids.add(task_id)
+                self.assertEqual(len(task_ids), 3)
+                self.assertEqual(len(list(Path(directory).glob("*.json"))), 3)
 
     def test_l2_rejects_unknown_tools_and_invalid_payloads(self):
+        allowed = {"create_task", "upload_task", "execute_task"}
         with self.assertRaises(ValueError):
-            validate_call(message(VARIANTS[0], "start_flight"), {"create_task", "start_flight"})
+            validate_call(message(VALID, "start_flight"), allowed)
         for payload in INVALID_PAYLOADS:
             with self.subTest(payload=payload), self.assertRaises(ValueError):
-                validate_call(message(payload), {"create_task"})
-        self.assertIsNone(validate_call({"content": "需要澄清"}, {"create_task"}))
+                validate_call(message(payload), allowed)
+        with self.assertRaises(ValueError):
+            validate_call(upload_call("BAD-ID"), allowed)
+        self.assertIsNone(validate_call({"content": "需要澄清"}, allowed))
 
     def test_l2_rejects_extra_arguments_and_multiple_calls(self):
-        invalid = message(VARIANTS[0])
+        invalid = message(VALID)
         invalid["tool_calls"][0]["function"]["arguments"] = json.dumps(
-            {"payload": VARIANTS[0], "header": {"msg_type": "START_FLIGHT"}})
+            {"payload": VALID, "header": {"msg_type": "START_FLIGHT"}})
         with self.assertRaises(ValueError):
             validate_call(invalid, {"create_task"})
-        duplicate = message(VARIANTS[0])
+        duplicate = message(VALID)
         duplicate["tool_calls"] *= 2
         with self.assertRaises(ValueError):
             validate_call(duplicate, {"create_task"})
 
-    def test_backend_rejects_invalid_input_without_writes(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-layers-backend-test-") as directory:
-            backend = SimulatedGCS(Path(directory))
-            for payload in INVALID_PAYLOADS:
+    def test_task_store_rejects_invalid_input_and_transitions_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TaskStore(Path(directory))
+            for payload in (p for p in INVALID_PAYLOADS if p["action"] == "create_task"):
                 with self.subTest(payload=payload), self.assertRaises(ValueError):
-                    template = json.loads(INTERFACE_FILE.read_text(encoding="utf-8"))
-                    backend.create_task({"header": template["header"], "payload": payload})
+                    store.create(payload["task"])
+            task_id = store.create(PreLaunchTask.model_validate(VALID["task"]))
+            with self.assertRaisesRegex(ValueError, "不能转到"):
+                store.execute(task_id)
+            with self.assertRaisesRegex(ValueError, "不存在"):
+                store.upload("TASK-unknown")
             self.assertEqual(list(Path(directory).iterdir()), [])
+            uploaded = store.upload(task_id)
+            self.assertEqual(json.loads(Path(uploaded["file"]).read_text()), uploaded)
+            with self.assertRaisesRegex(ValueError, "不能转到"):
+                store.upload(task_id)
+            store.execute(task_id)
+            with self.assertRaisesRegex(ValueError, "不能转到"):
+                store.execute(task_id)
 
-    def test_interface_payload_matches_default_example(self):
-        interface = json.loads(INTERFACE_FILE.read_text(encoding="utf-8"))
-        self.assertEqual(set(interface), {"header", "payload"})
-        self.assertEqual(CreateTaskPayload.model_validate(interface["payload"]).model_dump(), VARIANTS[0])
-
-    async def test_http_receives_full_json_and_rejects_bad_requests(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-http-test-") as directory, receiving_gcs(directory) as (url, _):
-            async with httpx.AsyncClient(base_url=url, trust_env=False) as client:
-                self.assertEqual((await client.get("/health")).json()["status"], "ok")
-                malformed = await client.post("/tasks", content="{", headers={"Content-Type": "application/json"})
-                self.assertEqual(malformed.status_code, 400)
-                self.assertEqual((await client.post("/tasks", json={"payload": VARIANTS[0]})).status_code, 422)
-                invalid = build_message(VARIANTS[0]).model_dump()
-                invalid["payload"] = formation("V型")
-                self.assertEqual((await client.post("/tasks", json=invalid)).status_code, 422)
-                self.assertEqual(list(Path(directory).iterdir()), [])
-                request = build_message(VARIANTS[0]).model_dump()
-                result = await client.post("/tasks", json=request)
-                self.assertEqual(result.status_code, 201)
-                self.assertEqual(result.json()["message"], request)
-
-    async def test_asr_file_transcript_flows_through_mcp_and_http(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-asr-file-test-") as directory, receiving_gcs(directory) as (url, _):
-            args = workflow_args(url, file=Path("recording.wav"))
+    async def test_asr_file_transcript_flows_through_mcp(self):
+        with tempfile.TemporaryDirectory(prefix="gcs-asr-file-test-") as directory:
+            args = workflow_args(Path(directory), file=Path("recording.wav"))
             asr_model = object()
             with patch("assistant.workflow.LocalModel", stub_local(message(VARIANTS[0]))), \
                  patch("inputs.speech.load_model", return_value=asr_model) as load, \
-                 patch("inputs.speech.transcribe_file", return_value="新增放飞前出任务模式为原地起飞") as transcribe, \
+                 patch("inputs.speech.transcribe_file", return_value="新增放飞前出任务原地起飞起飞高度50米") as transcribe, \
                  redirect_stdout(StringIO()) as output:
                 await run(args)
-            load.assert_called_once_with(args.asr_model_dir)
+            load.assert_called_once_with(args.asr_model_dir, args.asr_hotwords_file)
             transcribe.assert_called_once_with(asr_model, args.file)
-            files = list(Path(directory).glob("TASK-*.json"))
-            self.assertEqual(len(files), 1)
-            self.assertEqual(json.loads(files[0].read_text())["payload"], VARIANTS[0])
-            self.assertIn("已新增放飞前出任务", output.getvalue())
+            self.assertIn("已创建放飞前出任务", output.getvalue())
+            self.assertIn("TASK-", output.getvalue())
+            # 阶段一仅在助手侧创建草稿，地面站不产生文件
+            self.assertEqual(list(Path(directory).glob("TASK-*.json")), [])
 
     async def test_microphone_session_reuses_asr_for_multiple_commands(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-asr-mic-test-") as directory, receiving_gcs(directory) as (url, _):
-            args = workflow_args(url, mic=True)
-            with patch("assistant.workflow.LocalModel", stub_local(message(formation("U型")))), \
+        with tempfile.TemporaryDirectory(prefix="gcs-asr-mic-test-") as directory:
+            args = workflow_args(Path(directory), mic=True)
+            with patch("assistant.workflow.LocalModel", stub_local(message(VARIANTS[2]))), \
                  patch("inputs.speech.load_model", return_value=object()) as load, \
                  patch("inputs.speech.iter_microphone_transcripts", return_value=(text for text in [
-                     "", EXAMPLE, "新增U型编队飞行任务"])) as recordings, \
+                     "", EXAMPLE, "新增在指定位置展开任务，U型编队，起飞高度80米"])) as recordings, \
                  redirect_stdout(StringIO()) as output:
                 await run(args)
             load.assert_called_once()
             recordings.assert_called_once()
-            self.assertEqual(len(list(Path(directory).glob("TASK-*.json"))), 2)
-            self.assertIn("没有识别到文本", output.getvalue())
+            self.assertEqual(output.getvalue().count("已创建放飞前出任务"), 2)
+            self.assertEqual(list(Path(directory).glob("TASK-*.json")), [])
 
-    async def test_http_invalid_result_is_not_reported_as_created(self):
-        with tempfile.TemporaryDirectory(prefix="gcs-http-result-test-") as directory, receiving_gcs(directory) as (url, server):
-            with patch.object(server.backend, "create_task", return_value={"status": "created"}):
-                with self.assertRaisesRegex(ValueError, "返回结构无效"):
-                    await asyncio.to_thread(GCSHTTPClient(url).create_task, VARIANTS[0])
-            self.assertEqual(list(Path(directory).iterdir()), [])
+    def test_failed_save_keeps_draft_and_existing_files_are_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocked = Path(directory) / "blocked"
+            blocked.write_text("existing file")
+            store = TaskStore(blocked)
+            task_id = store.create(VALID["task"])
+            with self.assertRaises(OSError):
+                store.upload(task_id)
+            self.assertEqual(store.entry(task_id)["status"], "draft")
+            self.assertEqual(blocked.read_text(), "existing file")
+            store.output_dir = Path(directory)
+            destination = Path(directory) / f"{task_id}.json"
+            destination.write_text("existing task")
+            with self.assertRaisesRegex(ValueError, "未覆盖"):
+                store.upload(task_id)
+            self.assertEqual(destination.read_text(), "existing task")
+            self.assertEqual(store.entry(task_id)["status"], "draft")
+            destination.unlink()
+            store.upload(task_id)
+            self.assertEqual(store.entry(task_id)["status"], "uploaded")
 
     async def test_cancelled_microphone_wait_stops_recorder(self):
         ready = threading.Event()
@@ -289,7 +309,7 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
         with patch("inputs.speech.load_model", return_value=object()), \
              patch("inputs.speech.iter_microphone_transcripts", side_effect=recording), \
              redirect_stdout(StringIO()):
-            inputs = input_texts(workflow_args("http://127.0.0.1:18001", mic=True))
+            inputs = input_texts(workflow_args(Path(tempfile.gettempdir()), mic=True))
             pending = asyncio.create_task(anext(inputs))
             self.assertTrue(await asyncio.to_thread(ready.wait, 2))
             pending.cancel()

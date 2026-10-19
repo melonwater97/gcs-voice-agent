@@ -8,6 +8,7 @@ docs/cankao/
 output/
 .idea/
 .vscode/
+.trae/
 ~$*
 *.dtmp
 *.bkp

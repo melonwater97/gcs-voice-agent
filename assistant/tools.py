@@ -6,7 +6,9 @@ from typing import Callable
 
 from pydantic import BaseModel
 
-from shared.contracts import CreateTaskArguments, CreateTaskResult, describe_task
+from shared.contracts import (CreateTaskArguments, DraftTaskResult, ExecuteTaskArguments,
+                              ExecuteTaskResult, UploadTaskArguments, UploadTaskResult,
+                              describe_task, named_task)
 
 
 @dataclass(frozen=True)
@@ -65,17 +67,40 @@ class ToolRegistry:
         return Invocation(spec, spec.arguments_model.model_validate(arguments))
 
 
-def verify_created_task(arguments: CreateTaskArguments, result: CreateTaskResult) -> None:
-    if result.message.payload != arguments.payload:
-        raise ValueError("地面站返回的任务与调用建议不一致")
+def verify_created_task(arguments: CreateTaskArguments, result: DraftTaskResult) -> None:
+    if result.task != named_task(arguments.payload.task, result.task_id):
+        raise ValueError("返回的任务与调用建议不一致")
 
 
-def describe_created_task(result: CreateTaskResult) -> str:
-    return (f"已新增{describe_task(result.message.payload)}；任务编号：{result.task_id}。"
-            "模拟地面站已保存，未启动飞行。")
+def describe_created_task(result: DraftTaskResult) -> str:
+    return (f"已创建{describe_task(result.task)}，任务编号：{result.task_id}；"
+            "当前为草稿，尚未保存上传，未开始飞行。")
+
+
+def verify_uploaded_task(arguments: UploadTaskArguments, result: UploadTaskResult) -> None:
+    if result.task_id != arguments.task_id:
+        raise ValueError("返回任务编号不一致")
+
+
+def describe_uploaded_task(result: UploadTaskResult) -> str:
+    return (f"已保存并模拟上传{describe_task(result.task)}，"
+            f"任务编号：{result.task_id}；任务文件已保存在 Agent 侧，未开始飞行。")
+
+
+def verify_executed_task(arguments: ExecuteTaskArguments, result: ExecuteTaskResult) -> None:
+    if result.task_id != arguments.task_id:
+        raise ValueError("返回任务编号不一致")
+
+
+def describe_executed_task(result: ExecuteTaskResult) -> str:
+    return f"任务 {result.task_id} 进入模拟执行状态。"
 
 
 DEFAULT_TOOLS = ToolRegistry([
-    ToolSpec("create_task", CreateTaskArguments, CreateTaskResult,
+    ToolSpec("create_task", CreateTaskArguments, DraftTaskResult,
              verify_created_task, describe_created_task),
+    ToolSpec("upload_task", UploadTaskArguments, UploadTaskResult,
+             verify_uploaded_task, describe_uploaded_task),
+    ToolSpec("execute_task", ExecuteTaskArguments, ExecuteTaskResult,
+             verify_executed_task, describe_executed_task),
 ])
