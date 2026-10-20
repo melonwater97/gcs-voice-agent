@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { makeMessage, readVoiceStream } from '../src/lib/api.js';
 
 const request = makeMessage('VOICE_INPUT', { audio_format: 'wav', audio_base64: 'test' });
+const AGENT = { type: 'BACKGROUND', id: 'AGENT-01' };
+const FRONT = { type: 'FRONT', id: 'GS-01' };
 function frame(msgType, payload) {
-  return { ...makeMessage(msgType, payload), header: {
-    ...makeMessage(msgType, payload).header,
-    src: request.header.dst, dst: request.header.src, ref_msg_id: request.header.msg_id,
-  } };
+  const base = makeMessage(msgType, payload);
+  return { ...base, header: { ...base.header, src: AGENT, dst: FRONT } };
 }
 const transcript = frame('ASR_OUTPUT', { text: '起飞高度五十米' });
 const result = frame('AGENT_OUTPUT', { type: 'clarify', text: '请补充任务类型。' });
@@ -41,8 +41,8 @@ test('转写后的流中断保留已交付文本，并允许用原请求重试',
   assert.deepEqual(seen, [transcript]);
 });
 
-test('校验每帧路由与消息关联，拒绝没有转写的结果', async () => {
-  for (const invalid of [result, { ...transcript, header: { ...transcript.header, ref_msg_id: makeMessage('HEALTH_QUERY', {}).header.msg_id } }]) {
+test('校验每帧路由，拒绝没有转写的结果', async () => {
+  for (const invalid of [result, { ...transcript, header: { ...transcript.header, src: FRONT } }]) {
     const stream = new ReadableStream({ start(controller) { controller.enqueue(encode(invalid)); controller.close(); } });
     await assert.rejects(readVoiceStream(response(stream), request), error => error.retryable === true);
   }

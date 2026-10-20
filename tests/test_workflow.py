@@ -155,7 +155,6 @@ class DemoTests(unittest.IsolatedAsyncioTestCase):
                     result = await client.call_tool(name, request)
                     if not result.is_error:
                         body = Message[dict].model_validate(result.structured_content)
-                        self.assertEqual(body.header.ref_msg_id, request["header"]["msg_id"])
                         self.assertEqual(body.header.src.model_dump(), MCP)
                         self.assertEqual(body.header.dst.model_dump(), AGENT)
                     return result

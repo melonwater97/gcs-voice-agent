@@ -2,7 +2,7 @@
 
 统一流程：`React 地面站 → Agent（ASR / LLM / 参数校验）→ MCP 本地任务模拟 → Agent 返回结果 → React 展示`。
 
-React 界面就是地面站，直接请求 Agent，没有独立的地面站业务后端。Agent 负责 ASR、LLM 和 MCP，任务创建、保存与模拟执行在 Agent 侧完成，结果和参数状态返回界面。支持放飞前出任务和 C/U 型编队，默认使用本机 oMLX/Ornith 模型；当前只做模拟，不连接真实飞控。
+React 界面就是地面站，直接请求 Agent，没有独立的地面站业务后端。Agent 负责 ASR、LLM 和 MCP，任务创建、保存与模拟执行在 Agent 侧完成，结果和参数状态返回界面。支持放飞前出任务和 C/U 型编队。LLM 后端可替换：默认指向本机 oMLX/Ornith，也可用 `--url` + `--model` 指向任何 OpenAI 兼容且支持工具调用的服务（本机 llama.cpp、Ollama、DeepSeek 等，见下文）。当前只做模拟，不连接真实飞控。
 
 ## 安装
 
@@ -23,6 +23,8 @@ modelscope download iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-v
 
 保留完整模型目录，包括配置文件和权重；模型文件不提交到版本库。ASR 在 CPU 上运行，完成安装和模型下载后只读取本地模型。默认使用支持热词的 SeACo-Paraformer；原普通 Paraformer 保留在 `models/paraformer-large`。
 
+**中文 Windows 说明**：`--mic` 依赖 Unix 终端 API，不可用（改用 `--file`，界面侧用服务端录音）；funasr 默认按系统区域编码（GBK）读取热词文件，本项目已在 `inputs/speech.py` 内把该读取的默认编码固定为 UTF-8，无需额外设置环境变量。
+
 领域热词在 [`config/asr_hotwords.txt`](config/asr_hotwords.txt)，每行一个词，支持空行和 `#` 注释。当前包含 22 个领域词，覆盖任务类型、放飞模式、C/U 型编队、参数名称和坐标术语；不预设高度、坐标或任务名称。修改后重启 Agent 即生效，CLI 文件识别与麦克风输入也复用此配置。可通过 `--asr-hotwords-file /路径/词表.txt` 替换词表；需要关闭时指定空文件。普通 Paraformer 不支持热词，非空词表配合普通模型会明确报错，避免配置被静默忽略。接口依据见 [FunASR 官方文档](https://github.com/modelscope/FunASR/blob/main/docs/python_api.md)。
 
 任务支持独立的 `task_name`，例如“新增名为晨曦的放飞前出任务，原地起飞，起飞高度50米”。名称长度为 1–64 字，显式空白名称会被拒绝；未指定时由服务生成“任务类型-编号前8位”。任务列表、参数明细、变化记录和上传文件都保存名称。可继续说“上传晨曦任务”“执行晨曦任务”；Agent 保留本次会话的名称/编号/状态目录，同名有多个时应先澄清，实际工具仍用唯一 `task_id`。
@@ -31,13 +33,24 @@ Web Agent 会把本会话已创建任务的名称加入每次录音的热词，�
 
 ## 启动
 
-以下命令均在项目根目录执行。文本 CLI 可独立运行，不需要启动地面站界面或其他任务接收服务；需先启动 oMLX：
+以下命令均在项目根目录执行。文本 CLI 可独立运行，不需要启动地面站界面。**先准备一个 OpenAI 兼容、且支持工具调用（function calling）的模型服务**，三选一。
+
+**① 本机 llama.cpp（Windows/Linux 推荐）**，另开一个终端：
 
 ```sh
-python main.py assistant '新增放飞前出任务，模式为原地起飞'
+# 模型已在本地时（推荐，不依赖网络）
+llama-server -m /路径/Qwen3-4B-Instruct-2507-Q4_K_M.gguf --jinja -c 8192 -np 1 --port 8080
+# 或者让 llama-server 自己从 Hugging Face 拉取
+llama-server -hf unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M --jinja -c 8192 -np 1 --port 8080
 ```
 
-oMLX 在另一个终端启动：
+依赖与踩坑：用 `winget install llama.cpp` 装完后**必须新开一个终端**（PATH 只在进程启动时读取，旧窗口里会报 CommandNotFound）；`--jinja` 是工具调用的前提，不加会把工具调用当纯文本吐出、校验直接失败；`-c` 必须显式指定，否则会按模型的 262144 原生上下文分配 KV cache（还要乘槽位数），直接吃爆内存，`-np 1` 只保留一个槽位，单页面对话足够且更省内存。若工具调用失控（一次口令返回多个调用、`finish_reason=length`），说明这个版本太旧，换 GitHub 上的近期 nightly —— `winget` 装的是最新正式版，可能落后或带有已知的 Qwen3 工具调用解析缺陷。非默认后端统一用 `--url` + `--model` 接入，`--model` 只是标识，llama-server 不校验模型名：
+
+```sh
+python main.py assistant --url http://127.0.0.1:8080/v1/chat/completions --model qwen3-4b-instruct '新增放飞前出任务，模式为原地起飞'
+```
+
+**② macOS 本机 oMLX**（项目的默认后端，不加参数即指向它）：
 
 ```sh
 /opt/homebrew/opt/omlx/libexec/bin/python scripts/serve_omlx_cached.py \
@@ -46,21 +59,21 @@ oMLX 在另一个终端启动：
 
 当前 oMLX 0.6.3rc2 默认使用 2048-token 缓存块，无法命中本项目约 1600-token 的固定前缀。启动脚本在当前进程中适配为 512-token 分块，安装包保持原样；oMLX 升级后需重新验证。缓存配置与实测见 [缓存测试报告](docs/cache-performance.md)。
 
-随后使用文本、录音或麦克风：
-
-```sh
-python main.py assistant '新增C型编队飞行任务'
-python main.py assistant --file /绝对路径/口令.wav
-python main.py assistant --mic
-```
-
-不想启动本地模型时，可用 DeepSeek 云端模型替代（通过环境变量 `DEEPSEEK_API_KEY` 配置 Key）：
+**③ DeepSeek 云端**（通过环境变量 `DEEPSEEK_API_KEY` 配置 Key）：
 
 ```sh
 python main.py assistant --deepseek '新增C型编队飞行任务'
 ```
 
-麦克风模式按 `e` 开始录音，再按 `e` 结束并识别，按 `q` 退出，无需回车。每条口令都进入同一任务流程，ASR 模型和 MCP 连接在会话内复用。Paraformer 是整句识别模型，录音结束后才开始转写。麦克风录音需要交互式终端及系统权限。
+随后使用文本、录音或麦克风：
+
+```sh
+python main.py assistant '新增放飞前出任务，模式为原地起飞'        # 默认 oMLX；非默认后端加上 --url / --model
+python main.py assistant --file /绝对路径/口令.wav
+python main.py assistant --mic
+```
+
+麦克风模式按 `e` 开始录音，再按 `e` 结束并识别，按 `q` 退出，无需回车。每条口令都进入同一任务流程，ASR 模型和 MCP 连接在会话内复用。Paraformer 是整句识别模型，录音结束后才开始转写。麦克风录音需要交互式终端及系统权限；该模式依赖 Unix 终端 API，Windows 下不可用。
 
 `main.py` 是项目统一入口。根目录的独立 `asr.py` 已移除，ASR 能力位于 `inputs/speech.py`。
 
@@ -68,10 +81,10 @@ python main.py assistant --deepseek '新增C型编队飞行任务'
 
 地面站开发与联调请使用 [地面站对接接口文档](docs/地面站对接接口.md)，仅描述 React 与 Agent 的请求、响应和状态契约。内部工具契约见 [接口设计](docs/接口设计.md)。
 
-React 位于 `web/`，使用 React + Vite，需要 Node.js 22 或更高版本。先按上文启动 oMLX，再在项目根目录启动 Agent：
+React 位于 `web/`，使用 React + Vite，需要 Node.js 22 或更高版本。先按上文启动模型服务，再在项目根目录启动 Agent（非默认后端同样用 `--url` + `--model`）：
 
 ```sh
-python main.py web
+python main.py web --url http://127.0.0.1:8080/v1/chat/completions --model qwen3-4b-instruct
 ```
 
 Agent 监听 `127.0.0.1:18002`，启动时加载本地 ASR，并建立常驻 MCP 会话。在另一个终端启动界面：
@@ -86,10 +99,10 @@ npm run dev
 
 不再需要 `python main.py gcs`、`18001` 端口或 MCP 到地面站的 HTTP 回调。`simulator/backend.py` 现在只是 MCP 调用的本地任务模拟模块。上传将任务写入 Agent 侧的 `output/TASK-*.json`，成功后更新为已上传；可用 `python main.py web --task-output-dir /绝对路径/任务目录` 修改保存位置，CLI 助手也支持该选项。执行只更新模拟状态。
 
-接口统一使用 **`header + payload` JSON**，消息编号为 **`MSG-<UUID>`**，header 包含 msg_id、msg_type、version、src、dst、ref_msg_id。语音也使用 JSON，完整 WAV 文件经 Base64 编码放入 payload.audio_base64，payload.audio_format 为 wav；不再直接发送音频字节。文本放在 payload.text，关联编号放在 header.ref_msg_id，不使用 X-Msg-Id。四个接口均为 POST：/api/voice、/api/text、/api/state、/health，状态和健康查询的 payload 为 {}。成功和错误响应都使用同一信封。操作 payload 只含本次结果，完整任务列表和变化记录通过 /api/state 查询。内部 MCP 工具的业务参数和结果也采用该格式，MCP JSON-RPC 与模型提供方协议保持其标准格式。完整字段与示例见上述两份接口文档。
+接口统一使用 **`header + payload` JSON**，消息编号为 **`MSG-<UUID>`**，header 包含 msg_id、msg_type、version、src、dst。语音也使用 JSON，完整 WAV 文件经 Base64 编码放入 payload.audio_base64，payload.audio_format 为 wav；不再直接发送音频字节。文本放在 payload.text；请求与响应的对应关系由 HTTP 请求/响应本身确定，信封不再放关联编号，也不使用 X-Msg-Id。接口均为 POST：/api/voice、/api/text、/api/record/start、/api/record/status、/api/record/stop、/api/state、/health；除 /api/voice 外的请求 payload 均可为 {}。成功和错误响应都使用同一信封。操作 payload 只含本次结果，完整任务列表和变化记录通过 /api/state 查询。内部 MCP 工具的业务参数和结果也采用该格式，MCP JSON-RPC 与模型提供方协议保持其标准格式。完整字段与示例见上述两份接口文档。
 
-- 点击「点击说话」开始录音，再点击「结束并发送」。首次使用需要允许麦克风权限，单次录音最多 90 秒。
-- 前端只上传一次 16 kHz 单声道 PCM16 WAV；语音接口使用 NDJSON 分阶段响应：ASR 完成后立即返回 ASR_OUTPUT（payload.text）并显示到聊天框，Agent 内部继续 LLM 和工具处理，随后返回 AGENT_OUTPUT。每条仍为 header + payload JSON，前端不回传识别文本。
+- 点击「点击说话」让 Agent 开始监听麦克风，再点击「结束并发送」结束录音并识别。录音在服务端完成，浏览器不需要麦克风权限；单次录音最多 90 秒，可用 `python main.py web --record-max-seconds` 修改，到时服务端自动结束。界面用 `/api/record/status` 轮询电平与倒计时。
+- 语音接口使用 NDJSON 分阶段响应：ASR 完成后立即返回 ASR_OUTPUT（payload.text）并显示到聊天框，Agent 内部继续 LLM 和工具处理，随后返回 AGENT_OUTPUT。每条仍为 header + payload JSON，前端不回传识别文本。录音端点与 /api/voice 走同一套 Agent 流程，/api/voice 保留给自行编码 WAV 的外部地面站。
 - 对话区显示澄清问题、工具名称、成功回执或错误；操作响应不暴露内部调用参数、不重复返回全量状态。「文字输入」是可选入口，与语音共用后续处理；澄清补参也可以继续说话。
 - 任务面板展示完整参数、`草稿 → 已上传 → 执行中` 状态和变化记录。通过 /api/state 每 3 秒同步一次，操作完成后立即查询，刷新页面后恢复任务状态。
 - 任务示例：「新增放飞前出任务，原地起飞，起飞高度50米」→「上传刚才创建的任务」→「执行刚才上传的任务」。三个步骤分别执行，创建不会自动上传或执行。
@@ -105,13 +118,13 @@ npm run build
 npx playwright test
 ```
 
-浏览器测试要求当前环境的 `python` 已安装项目核心依赖，且本机已安装 Google Chrome。测试使用独立的 `18012/5174` 端口和临时目录，界面直接请求 Agent，再调用真实 MCP 本地模拟；ASR/LLM 为确定性桩，不代表真实模型识别准确率。
+浏览器测试要求当前环境的 `python` 已安装项目核心依赖，且本机已安装 Google Chrome。测试使用独立的 `18012/5174` 端口和临时目录，界面直接请求 Agent，再调用真实 MCP 本地模拟；ASR/LLM/录音为确定性桩，不代表真实模型识别准确率，也不需要真实麦克风。
 
 历史联调数据见 [ASR / oMLX 联调记录](docs/live-integration-20261016.md) 和 [名称与热词联调记录](docs/task-names-hotwords-20261016.md)；其中服务拓扑反映当时版本，当前地址与契约以上述两份接口文档为准。
 
 ## 框架与扩展
 
-- `inputs/`：统一文本、文件与连续麦克风输入。
+- `inputs/`：统一文本、文件、CLI 连续麦克风与服务端录音输入。
 - `inference/`：模型接口、本地推理及任务提示词。
 - `assistant/`：会话编排、工具白名单、参数与结果校验。
 - `integrations/`：Agent 的 MCP 客户端与工具服务。
@@ -129,4 +142,4 @@ npx playwright test
 python -m unittest discover -s tests -v
 ```
 
-测试使用临时目录和临时 HTTP 服务，不需要真实模型或麦克风。ASR 测试注入转写结果，模型测试使用桩模型与 OpenAI 兼容桩服务；它们不能证明真实模型的语义准确率。
+测试使用临时目录和临时 HTTP 服务，不需要真实模型或麦克风。ASR 测试注入转写结果，模型测试使用桩模型与 OpenAI 兼容桩服务，录音测试使用替身录音器（`tests/fakes.py`）；它们不能证明真实模型的语义准确率。

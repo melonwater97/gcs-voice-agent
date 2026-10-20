@@ -39,6 +39,9 @@ class LocalModel:
                     "messages": messages,
                     "tools": tools, "tool_choice": "auto", "temperature": 0,
                     "max_tokens": 2048,
+                    # 每条口令只执行一次调用；显式声明禁止并行工具调用，
+                    # 让本地服务端（如 llama.cpp）在生成阶段就约束为单次调用。
+                    "parallel_tool_calls": False,
                 })
                 response.raise_for_status()
                 body = response.json()
@@ -65,6 +68,7 @@ class DeepSeekModel:
                     "messages": messages,
                     "tools": tools, "tool_choice": "auto", "temperature": 0,
                     "max_tokens": 2048,
+                    "parallel_tool_calls": False,
                 }, headers={"Authorization": f"Bearer {self.api_key}"})
                 response.raise_for_status()
                 body = response.json()

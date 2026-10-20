@@ -107,9 +107,12 @@ class Assistant:
         try:
             invocation = self.registry.parse(message, self.allowed)
             if invocation is None:
-                log("L2", "无工具调用，结束：" + (message.get("content") or "需要澄清"))
-                self.pending = (message.get("content") or "待补全")[:PENDING_MAX_CHARS]
-                self.last_events.append({"type": "clarify", "text": self.pending})
+                answer = message.get("content") or "需要澄清"
+                log("L2", "无工具调用，结束：" + answer)
+                # 待补全目标保持精简：它每轮都会带进提示词，也是状态栏里的短提醒；
+                # 对话气泡展示模型完整答复，不能随待补全目标一起截断。
+                self.pending = answer[:PENDING_MAX_CHARS]
+                self.last_events.append({"type": "clarify", "text": answer})
                 return None
             if invocation.spec.name in {"upload_task", "execute_task"}:
                 task_id = invocation.arguments.task_id

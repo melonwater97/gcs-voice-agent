@@ -15,7 +15,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from assistant.tools import DEFAULT_TOOLS, ToolRegistry, ToolSpec
-from assistant.workflow import HISTORY_ROUNDS, Assistant, run
+from assistant.workflow import HISTORY_ROUNDS, PENDING_MAX_CHARS, Assistant, run
 from shared.config import (AssistantConfig, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
                            DEEPSEEK_URL, PROJECT_DIR)
 from inference.models import DeepSeekModel, LocalModel
@@ -137,6 +137,17 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("待补全", second[4]["content"])
         self.assertEqual(second[5], {"role": "user", "content": "起飞高度50米"})
         self.assertEqual(assistant.history[-1][-1]["role"], "tool")
+
+    async def test_long_clarify_is_delivered_whole_while_pending_stays_compact(self):
+        answer = "请补充起飞高度、编队类型和展开位置。" * 20     # 远超 PENDING_MAX_CHARS
+        assistant = Assistant(InjectedModel({"content": answer}),
+                              InjectedGateway(["create_task", "upload_task", "execute_task"]))
+        with redirect_stdout(StringIO()):
+            await assistant.prepare()
+            self.assertIsNone(await assistant.process_text("新增编队任务"))
+        events = [event for event in assistant.last_events if event["type"] == "clarify"]
+        self.assertEqual(events[0]["text"], answer)               # 气泡展示完整答复
+        self.assertEqual(assistant.pending, answer[:PENDING_MAX_CHARS])  # 待补全目标保持精简
 
     async def test_history_window_keeps_recent_rounds_only(self):
         assistant = Assistant(ScriptedModel([{"content": f"澄清{i}"} for i in range(6)]),

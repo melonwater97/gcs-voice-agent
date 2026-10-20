@@ -8,8 +8,6 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:5174',
     channel: 'chrome',
     viewport: { width: 1440, height: 1000 },
-    permissions: ['microphone'],
-    launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] },
   },
   webServer: [
     { command: 'python -m tests.web_test_server', cwd: '..', port: 18012, reuseExistingServer: false },

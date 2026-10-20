@@ -28,6 +28,7 @@ class AssistantConfig:
     asr_model_dir: Path = MODEL_DIR
     asr_hotwords_file: Path = ASR_HOTWORDS_FILE
     task_output_dir: Path = OUTPUT_DIR
+    record_max_seconds: int = 90
 
     def __post_init__(self):
         if sum((self.text is not None, self.file is not None, self.mic)) > 1:

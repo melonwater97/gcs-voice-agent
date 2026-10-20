@@ -1,5 +1,6 @@
 """Run a local Paraformer checkpoint on a file or interactive microphone input."""
 
+import codecs
 import os
 import re
 import select
@@ -9,6 +10,21 @@ from pathlib import Path
 
 from shared.config import ASR_HOTWORDS_FILE, MODEL_DIR
 from shared.reporting import log
+
+# funasr 用 codecs.open(path, "r")（不传 encoding）读取热词文件，会回退到系统区域
+# 编码：中文 Windows 上是 cp936/GBK，把本模块写出的 UTF-8 词表读成乱码并抛
+# UnicodeDecodeError。这里在加载 funasr 前把「文本读取且未指定编码」的默认编码
+# 固定为 UTF-8；显式编码和二进制读写保持原样，不受影响。
+_codecs_open = codecs.open
+
+
+def _utf8_codecs_open(filename, mode="r", encoding=None, errors="strict", buffering=-1):
+    if encoding is None and mode in ("r", "rt"):
+        encoding = "utf-8"
+    return _codecs_open(filename, mode, encoding, errors, buffering)
+
+
+codecs.open = _utf8_codecs_open
 
 
 def load_hotwords(path: Path = ASR_HOTWORDS_FILE) -> list[str]:

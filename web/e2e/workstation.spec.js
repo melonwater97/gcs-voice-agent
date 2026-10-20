@@ -8,7 +8,11 @@ test('录音 → 转写 → 真实 MCP 创建、上传、执行 → 刷新恢复
   await expect(page.getByText('Agent 已连接', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/ground-station-empty.png', fullPage: true });
   const sequence = [];
-  page.on('request', request => { if (request.method() === 'POST' && /\/api\/(voice|text)$/.test(request.url())) sequence.push(request.url().split('/').pop()); });
+  page.on('request', request => {
+    if (request.method() !== 'POST') return;
+    const match = /\/(start|stop|text)$/.exec(request.url());
+    if (match) sequence.push(match[1]);
+  });
   await page.getByRole('button', { name: '开始说话' }).click();
   await expect(page.getByText('正在聆听', { exact: true })).toBeVisible();
   await page.waitForTimeout(600);
@@ -20,7 +24,7 @@ test('录音 → 转写 → 真实 MCP 创建、上传、执行 → 刷新恢复
   await expect(page.getByText('语音转写', { exact: true })).toBeVisible();
   await expect(page.getByText('create_task', { exact: true })).toBeVisible();
   await expect(page.getByRole('definition').filter({ hasText: '50' })).toBeVisible();
-  expect(sequence).toEqual(['voice']);
+  expect(sequence).toEqual(['start', 'stop']);
 
   await page.getByRole('button', { name: '文字输入' }).click();
   const command = page.getByRole('textbox', { name: '文字口令' });
@@ -41,7 +45,7 @@ test('录音 → 转写 → 真实 MCP 创建、上传、执行 → 刷新恢复
   expect(errors).toEqual([]);
 });
 
-test('澄清、权限拒绝、服务离线和手机布局', async ({ page, context }) => {
+test('澄清、麦克风开启失败、服务离线和手机布局', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Agent 已连接', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '文字输入' }).click();
@@ -49,13 +53,13 @@ test('澄清、权限拒绝、服务离线和手机布局', async ({ page, conte
   await page.getByRole('button', { name: '发送文字口令' }).click();
   await expect(page.locator('.bubble').filter({ hasText: '请补充起飞高度' })).toBeVisible();
   await expect(page.locator('.pending')).toContainText('请补充起飞高度');
-  await context.clearPermissions();
-  await page.addInitScript(() => {
-    navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('denied', 'NotAllowedError'); };
-  });
-  await page.reload();
+  // 服务端开麦失败时前端展示服务端错误，不进入录音态
+  await page.route('**/api/record/start', route => route.fulfill({
+    status: 503, json: { payload: { error: '无法开启麦克风：设备被占用' } } }));
   await page.getByRole('button', { name: '开始说话' }).click();
-  await expect(page.getByText('麦克风权限未开启，请在浏览器地址栏允许访问后重试。', { exact: true })).toBeVisible();
+  await expect(page.getByText('无法开启麦克风：设备被占用', { exact: true })).toBeVisible();
+  await expect(page.getByText('正在聆听', { exact: true })).toHaveCount(0);
+  await page.unroute('**/api/record/start');
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => { document.documentElement.style.scrollBehavior = 'auto'; window.scrollTo(0, 0); });
   await page.waitForTimeout(500);
@@ -89,16 +93,16 @@ test('响应丢失后沿用原消息编号重试，任务只创建一次', async
   expect(after.tasks.length).toBe(before.tasks.length + 1);
 });
 
-test('语音响应丢失后重试原录音，不回传文本且任务只创建一次', async ({ page }) => {
+test('结束录音响应丢失后按原消息编号重试，不回退文字输入且任务只创建一次', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Agent 已连接', { exact: true })).toBeVisible();
   const before = (await (await page.request.post('/api/state', { data: makeMessage('STATE_QUERY', {}) })).json()).payload;
-  const messages = [];
+  const ids = [];
   const textRequests = [];
   page.on('request', request => { if (request.url().endsWith('/api/text')) textRequests.push(request.url()); });
-  await page.route('**/api/voice', async route => {
-    messages.push(route.request().postDataJSON());
-    if (messages.length === 1) {
+  await page.route('**/api/record/stop', async route => {
+    ids.push(route.request().postDataJSON().header.msg_id);
+    if (ids.length === 1) {
       await route.fetch();
       await route.abort('failed');
     } else await route.continue();
@@ -109,8 +113,8 @@ test('语音响应丢失后重试原录音，不回传文本且任务只创建�
   await page.getByRole('button', { name: '重试本次请求' }).click();
   await expect(page.getByText('创建任务成功', { exact: true })).toBeVisible();
   await expect(page.getByText('语音转写', { exact: true })).toBeVisible();
-  expect(messages).toHaveLength(2);
-  expect(messages[1]).toEqual(messages[0]);
+  expect(ids).toHaveLength(2);
+  expect(ids[1]).toEqual(ids[0]);
   expect(textRequests).toEqual([]);
   const after = (await (await page.request.post('/api/state', { data: makeMessage('STATE_QUERY', {}) })).json()).payload;
   expect(after.tasks.length).toBe(before.tasks.length + 1);
@@ -143,7 +147,7 @@ test('收到转写后连接中断，重试不重复显示转写或创建任务',
     let interrupted = false;
     window.fetch = async (url, options) => {
       const response = await original(url, options);
-      if (url !== '/api/voice' || interrupted) return response;
+      if (url !== '/api/record/stop' || interrupted) return response;
       interrupted = true;
       const reader = response.body.getReader();
       let buffer = '';
@@ -165,7 +169,7 @@ test('收到转写后连接中断，重试不重复显示转写或创建任务',
     };
   });
   const ids = [];
-  page.on('request', request => { if (request.url().endsWith('/api/voice')) ids.push(request.postDataJSON().header.msg_id); });
+  page.on('request', request => { if (request.url().endsWith('/api/record/stop')) ids.push(request.postDataJSON().header.msg_id); });
   await page.getByRole('button', { name: '开始说话' }).click();
   await page.waitForTimeout(400);
   await page.getByRole('button', { name: '结束录音并发送' }).click();

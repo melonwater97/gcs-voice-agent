@@ -1,4 +1,4 @@
-"""Browser test fixture: direct browser → Agent → MCP, deterministic ASR and LLM only.
+"""Browser test fixture: direct browser → Agent → MCP, deterministic ASR/LLM/录音 only.
 
 Run from the repository root: python -m tests.web_test_server
 Uses temporary storage and isolated ports; never writes production task files.
@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent.http_server import build_runtime
 from shared.config import AssistantConfig
+from tests.fakes import FakeRecorderFactory
 
 
 class BrowserTestModel:
@@ -39,7 +40,8 @@ def main():
         config = AssistantConfig(task_output_dir=Path(directory))
         with patch("agent.http_server.LocalModel", BrowserTestModel), \
                 patch("inputs.speech.transcribe_file", return_value="新增放飞前出任务，原地起飞，起飞高度50米"):
-            runtime = build_runtime(config, "127.0.0.1", 18012, asr_model=object())
+            runtime = build_runtime(config, "127.0.0.1", 18012, asr_model=object(),
+                                    recorder_factory=FakeRecorderFactory())
             try:
                 runtime.server.serve_forever()
             finally:

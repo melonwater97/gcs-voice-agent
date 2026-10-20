@@ -4,24 +4,24 @@ const FRONT = { type: 'FRONT', id: 'GS-01' };
 const AGENT = { type: 'BACKGROUND', id: 'AGENT-01' };
 const RESPONSE_TYPES = {
   VOICE_INPUT: 'AGENT_OUTPUT', AGENT_INPUT: 'AGENT_OUTPUT',
+  RECORD_START: 'RECORD_START_OUTPUT', RECORD_STATUS: 'RECORD_STATUS_OUTPUT',
   STATE_QUERY: 'STATE_OUTPUT', HEALTH_QUERY: 'HEALTH_OUTPUT',
 };
 const MSG_ID = /^MSG-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export function makeMessage(msgType, payload, msgId = nextMsgId(), refMsgId = null) {
+export function makeMessage(msgType, payload, msgId = nextMsgId()) {
   return { header: { msg_id: msgId, msg_type: msgType, version: '1.0.0',
-    src: FRONT, dst: AGENT, ref_msg_id: refMsgId }, payload };
+    src: FRONT, dst: AGENT }, payload };
 }
 
 function validateMessage(body, message, allowedTypes) {
   const header = body?.header;
   if (!header || !MSG_ID.test(header.msg_id) || header.version !== '1.0.0'
       || !allowedTypes.includes(header.msg_type)
-      || header.ref_msg_id !== message.header.msg_id
       || header.src?.id !== AGENT.id || header.src?.type !== AGENT.type
       || header.dst?.id !== FRONT.id || header.dst?.type !== FRONT.type
       || !body.payload || typeof body.payload !== 'object' || Array.isArray(body.payload)) {
-    throw Object.assign(new Error('Agent 返回的消息结构或关联编号无效。'), { retryable: true });
+    throw Object.assign(new Error('Agent 返回的消息结构无效。'), { retryable: true });
   }
   return body;
 }
@@ -82,7 +82,9 @@ async function request(path, message, timeout = 190000, onTranscript) {
       error.retryable = [502, 503, 504].includes(response.status);
       throw error;
     }
-    if (message.header.msg_type === 'VOICE_INPUT') return await readVoiceStream(response, message, onTranscript);
+    if (message.header.msg_type === 'VOICE_INPUT' || message.header.msg_type === 'RECORD_STOP') {
+      return await readVoiceStream(response, message, onTranscript);
+    }
     return validateMessage(await response.json().catch(() => null), message,
       [RESPONSE_TYPES[message.header.msg_type]]);
   } catch (error) {
@@ -94,19 +96,10 @@ async function request(path, message, timeout = 190000, onTranscript) {
   }
 }
 
-export async function audioBase64(blob) {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  // 分块转换，避免长录音在展开函数参数时超过调用栈限制。
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 32768) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
-  }
-  return btoa(binary);
-}
-
-export const sendVoice = async (blob, msgId, onTranscript) => request('/api/voice', makeMessage(
-  'VOICE_INPUT', { audio_format: 'wav', audio_base64: await audioBase64(blob) }, msgId), 190000, onTranscript);
-export const sendText = (text, refMsgId, msgId) => request('/api/text', makeMessage(
-  'AGENT_INPUT', { text }, msgId, refMsgId));
+export const startRecord = msgId => request('/api/record/start', makeMessage('RECORD_START', {}, msgId), 10000);
+export const stopRecord = (msgId, onTranscript) => request('/api/record/stop', makeMessage(
+  'RECORD_STOP', {}, msgId), 190000, onTranscript);
+export const getRecordStatus = msgId => request('/api/record/status', makeMessage('RECORD_STATUS', {}, msgId), 5000);
+export const sendText = (text, msgId) => request('/api/text', makeMessage('AGENT_INPUT', { text }, msgId));
 export const getState = async () => (await request('/api/state', makeMessage('STATE_QUERY', {}), 5000)).payload;
 export const getHealth = async () => (await request('/health', makeMessage('HEALTH_QUERY', {}), 5000)).payload;

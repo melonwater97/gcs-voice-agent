@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioLines, CircleHelp, RadioTower, RefreshCw, ShieldCheck, Terminal, Wifi, WifiOff } from 'lucide-react';
 import ChatPanel from './components/ChatPanel.jsx';
 import TaskPanel from './components/TaskPanel.jsx';
-import { getHealth, getState, sendText, sendVoice } from './lib/api.js';
+import { getHealth, getRecordStatus, getState, sendText, startRecord, stopRecord } from './lib/api.js';
 import { nextMsgId } from './lib/msgId.js';
-import { MAX_RECORD_SECONDS, VoiceRecorder } from './lib/recorder.js';
 
 const EMPTY = { tasks: [], changes: [], pending: null, revision: -1 };
 const REST_PHASES = new Set(['idle', 'recording']);
+const STATUS_POLL_MS = 200;
 
 export default function App() {
   const [state, setState] = useState(EMPTY);
@@ -18,11 +18,13 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [level, setLevel] = useState(0);
   const [seconds, setSeconds] = useState(0);
+  const [maxSeconds, setMaxSeconds] = useState(90);
   const [retry, setRetry] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
   const mounted = useRef(true);
   const busy = useRef(false);
-  const recorder = useRef(null);
+  const polling = useRef(null);
+  const stopping = useRef(false);
   const currentState = useRef(EMPTY);
   const stopRef = useRef(null);
   const shownTranscripts = useRef(new Set());
@@ -59,15 +61,18 @@ export default function App() {
       }
     };
     sync();
-    return () => { active = false; mounted.current = false; clearTimeout(timer); recorder.current?.cancel(); };
+    return () => {
+      active = false; mounted.current = false; clearTimeout(timer);
+      if (polling.current) clearInterval(polling.current);
+    };
   }, [applyState]);
 
   const processRequest = async request => {
     let response;
     try {
-      if (request.kind === 'voice') {
-        setPhase('transcribing');
-        response = await sendVoice(request.blob, request.msgId, frame => {
+      if (request.kind === 'record-stop') {
+        setPhase('stopping');
+        response = await stopRecord(request.msgId, frame => {
           if (!mounted.current) return;
           if (!shownTranscripts.current.has(request.msgId)) {
             shownTranscripts.current.add(request.msgId);
@@ -78,7 +83,7 @@ export default function App() {
         });
       } else {
         setPhase('thinking');
-        response = await sendText(request.text, request.ref, request.msgId);
+        response = await sendText(request.text, request.msgId);
       }
       if (!mounted.current) return;
       const result = response.payload;
@@ -97,20 +102,31 @@ export default function App() {
     }
   };
 
+  const stopPolling = () => {
+    if (polling.current) { clearInterval(polling.current); polling.current = null; }
+  };
+  const startPolling = () => {
+    stopPolling();
+    polling.current = setInterval(async () => {
+      try {
+        const frame = await getRecordStatus(await nextMsgId());
+        if (!mounted.current) return;
+        const payload = frame.payload;
+        setLevel(payload.level ?? 0);
+        setSeconds(payload.seconds ?? 0);
+        if (payload.max_seconds) setMaxSeconds(payload.max_seconds);
+        // 服务端到 90 秒上限会自动停录，以 listening 为准收尾。
+        if (!payload.listening) { stopPolling(); stopRef.current(); }
+      } catch { /* 录音期间的轮询失败不打断本次录音，下一轮重试 */ }
+    }, STATUS_POLL_MS);
+  };
+
   const stopRecording = async () => {
-    if (!recorder.current) return;
-    const current = recorder.current;
-    recorder.current = null;
-    setPhase('encoding'); setLevel(0);
-    try {
-      const blob = await current.stop();
-      if (!mounted.current) return;
-      await processRequest({ kind: 'voice', blob, msgId: await nextMsgId() });
-    } catch (error) {
-      addMessage({ type: 'error', text: error.message });
-      busy.current = false;
-      if (mounted.current) setPhase('idle');
-    }
+    if (stopping.current) return;
+    stopping.current = true;
+    stopPolling(); setLevel(0);
+    try { await processRequest({ kind: 'record-stop', msgId: await nextMsgId() }); }
+    finally { stopping.current = false; }
   };
   stopRef.current = stopRecording;
 
@@ -118,38 +134,26 @@ export default function App() {
     if (phase === 'recording') { await stopRecording(); return; }
     if (busy.current || !online) return;
     busy.current = true; setRetry(null); setPhase('requesting');
-    const current = new VoiceRecorder(value => { if (mounted.current) setLevel(value); }, () => {
-      current.cancel(); recorder.current = null; busy.current = false;
-      if (mounted.current) { setPhase('idle'); setLevel(0); addMessage({ type: 'error', text: '麦克风连接已中断，请检查设备后重新录音。' }); }
-    });
-    recorder.current = current;
     try {
-      await current.start();
-      if (!mounted.current || current.cancelled) return;
-      setSeconds(0); setPhase('recording');
+      const frame = await startRecord(await nextMsgId());
+      if (!mounted.current) return;
+      if (!frame.payload.listening) throw new Error('麦克风监听未开启，请重试。');
+      setLevel(0); setSeconds(0);
+      if (frame.payload.max_seconds) setMaxSeconds(frame.payload.max_seconds);
+      setPhase('recording');
+      startPolling();
     } catch (error) {
-      recorder.current = null; busy.current = false;
+      busy.current = false;
       addMessage({ type: 'error', text: error.message });
       if (mounted.current) setPhase('idle');
     }
   };
 
-  useEffect(() => {
-    if (phase !== 'recording') return;
-    const started = performance.now();
-    const timer = setInterval(() => {
-      const elapsed = Math.floor((performance.now() - started) / 1000);
-      setSeconds(elapsed);
-      if (elapsed >= MAX_RECORD_SECONDS) { clearInterval(timer); stopRef.current(); }
-    }, 250);
-    return () => clearInterval(timer);
-  }, [phase]);
-
   const submitText = async text => {
     if (busy.current || !online) return;
     busy.current = true; setRetry(null); setPhase('thinking');
     addMessage({ type: 'user', source: 'text', text });
-    try { await processRequest({ kind: 'text', text, ref: null, msgId: await nextMsgId() }); }
+    try { await processRequest({ kind: 'text', text, msgId: await nextMsgId() }); }
     catch (error) { busy.current = false; setPhase('idle'); addMessage({ type: 'error', text: error.message }); }
   };
   const retryRequest = () => {
@@ -172,14 +176,14 @@ export default function App() {
           <div className="simulation-notice"><ShieldCheck size={16} /><span>本地模拟环境<br /><small>任务操作仅作用于模拟服务</small></span></div>
         </div>
         {!online && connection !== 'connecting' && <div className="connection-banner" role="status"><WifiOff size={15} /><span>Agent 服务尚未连接。请启动 <code>python main.py web</code>，页面会自动重连。</span></div>}
-        <div className="panels"><ChatPanel messages={messages} phase={phase} level={level} seconds={seconds} pending={state.pending} online={online} onRecord={toggleRecording} onText={submitText} retry={retry} onRetry={retryRequest} />
+        <div className="panels"><ChatPanel messages={messages} phase={phase} level={level} seconds={seconds} maxSeconds={maxSeconds} pending={state.pending} online={online} onRecord={toggleRecording} onText={submitText} retry={retry} onRetry={retryRequest} />
           <TaskPanel tasks={state.tasks} changes={state.changes || []} selectedId={selectedId} onSelect={setSelectedId} syncing={!REST_PHASES.has(phase)} online={online} />
         </div>
       </main>
       <footer><span><span className={`status-dot ${online ? 'green' : ''}`} />{online ? '工作站就绪' : '等待服务连接'}</span><span><AudioLines size={12} />ASR → Agent → MCP</span><span>GS-01<span className="footer-divider">/</span>模拟地面站</span></footer>
     </div>
     {showHelp && <div className="modal-backdrop" onClick={() => setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-label="使用说明" onClick={event => event.stopPropagation()}>
-      <h2>使用说明</h2><p>1. 点击「点击说话」，允许浏览器访问麦克风。</p><p>2. 说出任务口令，再点击「结束并发送」。单次最多录音 90 秒。</p><p>3. 录音只发送一次，识别文字先显示，Agent 继续处理后再显示澄清或任务结果。</p><p>4. 在右侧选择任务，查看状态、完整参数和变化记录。</p><p>当前支持创建、上传和模拟执行任务。参数编辑工具尚未接入。任务和变化记录在 Agent 本次运行期间保留；重启 Agent 将清空会话。</p><button autoFocus onClick={() => setShowHelp(false)}>知道了</button>
+      <h2>使用说明</h2><p>1. 点击「点击说话」，服务端开始监听麦克风。</p><p>2. 说出任务口令，再点击「结束并发送」。单次最多录音 {Math.round(maxSeconds / 60)} 分钟，到时自动结束。</p><p>3. 录音只发送一次，识别文字先显示，Agent 继续处理后再显示澄清或任务结果。</p><p>4. 在右侧选择任务，查看状态、完整参数和变化记录。</p><p>当前支持创建、上传和模拟执行任务。参数编辑工具尚未接入。任务和变化记录在 Agent 本次运行期间保留；重启 Agent 将清空会话。</p><button autoFocus onClick={() => setShowHelp(false)}>知道了</button>
     </section></div>}
   </div>;
 }

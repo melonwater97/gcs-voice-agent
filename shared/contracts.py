@@ -144,6 +144,9 @@ class ExecuteTaskArguments(StrictModel):
 MSG_TYPES = {
     "VOICE_INPUT": "地面站提交语音", "AGENT_INPUT": "地面站提交文本",
     "ASR_OUTPUT": "语音转写完成", "AGENT_OUTPUT": "口令处理结果",
+    "RECORD_START": "开始服务端录音", "RECORD_STOP": "结束服务端录音",
+    "RECORD_STATUS": "录音进度查询", "RECORD_START_OUTPUT": "录音监听状态",
+    "RECORD_STATUS_OUTPUT": "录音进度快照",
     "STATE_QUERY": "查询状态", "STATE_OUTPUT": "状态快照",
     "HEALTH_QUERY": "健康查询", "HEALTH_OUTPUT": "健康状态",
     "CREATE_TASK": "创建工具请求", "UPLOAD_TASK": "上传工具请求",
@@ -167,7 +170,6 @@ class MessageHeader(StrictModel):
     version: Literal["1.0.0"]
     src: MessageEndpoint
     dst: MessageEndpoint
-    ref_msg_id: MsgId | None = None
 
 
 PayloadT = TypeVar("PayloadT")

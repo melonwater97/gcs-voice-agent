@@ -84,7 +84,7 @@ class AgentRuntime:
 
 
 def build_runtime(config: AssistantConfig, host: str, port: int,
-                  asr_model=None) -> AgentRuntime:
+                  asr_model=None, recorder_factory=None) -> AgentRuntime:
     """启动事件循环线程、加载 ASR、建立 MCP 会话并返回监听中的 HTTP 服务。"""
     if asr_model is None:
         log("ASR", "加载本地 Paraformer；服务启动阶段只加载一次")
@@ -113,7 +113,8 @@ def build_runtime(config: AssistantConfig, host: str, port: int,
             async with mcp_session:
                 assistant = Assistant(model, mcp_session)
                 await assistant.prepare()
-                service = AgentService(assistant, asr_model)
+                service = AgentService(assistant, asr_model, recorder_factory=recorder_factory,
+                                       max_seconds=config.record_max_seconds)
                 shutdown = asyncio.Event()
                 ready.set_result((service, shutdown))
                 await shutdown.wait()
@@ -174,6 +175,9 @@ class AgentHandler(BaseHTTPRequestHandler):
         routes = {
             "/api/voice": ("VOICE_INPUT", VoiceInput),
             "/api/text": ("AGENT_INPUT", TextInput),
+            "/api/record/start": ("RECORD_START", EmptyPayload),
+            "/api/record/stop": ("RECORD_STOP", EmptyPayload),
+            "/api/record/status": ("RECORD_STATUS", EmptyPayload),
             "/api/state": ("STATE_QUERY", EmptyPayload),
             "/health": ("HEALTH_QUERY", EmptyPayload),
         }
@@ -188,6 +192,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/voice":
                 self.handle_voice(message)
+            elif path == "/api/record/start":
+                status, body = self.submit(self.server.service.handle_record_start(message.header))
+                self.reply(status, body)
+            elif path == "/api/record/status":
+                status, body = self.submit(self.server.service.handle_record_status(message.header))
+                self.reply(status, body)
+            elif path == "/api/record/stop":
+                self.handle_record_stop(message)
             elif path == "/api/text":
                 status, body = self.submit(self.server.service.handle_text(
                     message.header, message.payload.text))
@@ -237,24 +249,40 @@ class AgentHandler(BaseHTTPRequestHandler):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as file:
             file.write(data)
             wav_path = Path(file.name)
+        self.stream_ndjson(
+            message,
+            lambda on_transcript: self.server.service.handle_voice(
+                message.header, wav_path, on_transcript),
+            cleanup=lambda: wav_path.unlink(missing_ok=True))
 
+    def handle_record_stop(self, message) -> None:
+        self.stream_ndjson(
+            message,
+            lambda on_transcript: self.server.service.handle_record_stop(
+                message.header, on_transcript))
+
+    def stream_ndjson(self, message, run, cleanup=None) -> None:
+        """语音与录音共用的分阶段响应：先 ASR_OUTPUT，后 AGENT_OUTPUT。
+
+        `run(on_transcript)` 返回最终 (status, body)；请求连接关闭后也继续完成
+        Agent 流程并缓存结果，不因断线重复执行工具。`cleanup` 在协程结束时执行。
+        """
         updates = queue.Queue()
 
-        async def transcribe_and_cleanup():
+        async def worker():
             try:
-                status, body = await self.server.service.handle_voice(
-                    message.header, wav_path,
-                    on_transcript=lambda body: updates.put((200, body, False)))
+                status, body = await run(
+                    lambda body: updates.put((200, body, False)))
                 updates.put((status, body, True))
             except Exception as exc:
                 log("错误", f"语音处理失败：{exc}")
                 updates.put((500, make_message("ERROR", {"error": "语音处理失败，请查看任务状态后使用原消息编号重试。"},
                                                request=message.header), True))
             finally:
-                wav_path.unlink(missing_ok=True)
+                if cleanup is not None:
+                    cleanup()
 
-        # 请求连接关闭后也继续完成 Agent 流程并缓存结果，不能因断线重复执行工具。
-        asyncio.run_coroutine_threadsafe(transcribe_and_cleanup(), self.server.loop)
+        asyncio.run_coroutine_threadsafe(worker(), self.server.loop)
         deadline = time.monotonic() + CALL_TIMEOUT
         streaming = False
         try:

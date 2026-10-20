@@ -4,9 +4,10 @@ import { shortId, STATUS, TOOLS, timeLabel } from '../lib/tasks.js';
 
 const PHASES = {
   idle: '准备接收口令', requesting: '正在开启麦克风', recording: '正在聆听',
-  encoding: '正在处理录音', transcribing: '正在识别语音', thinking: 'Agent 正在处理',
+  stopping: '正在识别语音', thinking: 'Agent 正在处理',
 };
 const EXAMPLES = ['新增名为晨曦的放飞前出任务，原地起飞，起飞高度50米', '上传晨曦任务', '执行晨曦任务'];
+const clock = value => `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
 
 function Message({ message }) {
   if (message.type === 'task_result') return <div className="result-message">
@@ -25,7 +26,7 @@ function Message({ message }) {
   </div>;
 }
 
-export default function ChatPanel({ messages, phase, level, seconds, pending, online, onRecord, onText, retry, onRetry }) {
+export default function ChatPanel({ messages, phase, level, seconds, maxSeconds = 90, pending, online, onRecord, onText, retry, onRetry }) {
   const [text, setText] = useState('');
   const [showText, setShowText] = useState(false);
   const bottom = useRef(null);
@@ -63,7 +64,7 @@ export default function ChatPanel({ messages, phase, level, seconds, pending, on
     <div className={`composer ${recording ? 'is-recording' : ''}`}>
       <div className="record-status"><span className={`status-dot ${recording ? 'red' : online ? 'green' : ''}`} />
         <span aria-live="polite">{!online && phase === 'idle' ? '等待 Agent 连接' : PHASES[phase]}</span>
-        <span className="record-duration">{recording ? `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')} / 01:30` : '点击开始，再次点击结束'}</span>
+        <span className="record-duration">{recording ? `${clock(seconds)} / ${clock(maxSeconds)}` : '点击开始，再次点击结束'}</span>
       </div>
       <div className="record-controls">
         <div className={`waveform ${recording ? 'active' : ''}`} aria-hidden="true">

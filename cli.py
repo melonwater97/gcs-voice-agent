@@ -22,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     web = commands.add_parser("web", help="启动 React 地面站直接调用的 Agent 服务")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=18002)
+    web.add_argument("--record-max-seconds", type=int, default=90,
+                     help="服务端录音单次最长时长，单位秒")
     for command in (assistant, web):
         command.add_argument("--asr-model-dir", type=Path, default=MODEL_DIR)
         command.add_argument("--asr-hotwords-file", type=Path, default=ASR_HOTWORDS_FILE,

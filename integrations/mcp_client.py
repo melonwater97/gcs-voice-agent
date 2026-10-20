@@ -79,9 +79,8 @@ class MCPSession:
             raise ValueError("工具没有返回预期的结构化结果")
         message = Message[dict].model_validate(result.structured_content)
         header = message.header
-        if (header.ref_msg_id != request["header"]["msg_id"]
-                or header.src.model_dump() != MCP or header.dst.model_dump() != AGENT):
-            raise ValueError("MCP 结果的路由或关联编号不一致")
+        if (header.src.model_dump() != MCP or header.dst.model_dump() != AGENT):
+            raise ValueError("MCP 结果的路由不一致")
         if header.msg_type == "ERROR":
             raise ValueError("工具拒绝：" + message.payload.get("error", "未知错误"))
         if header.msg_type != "TASK_RESULT":
