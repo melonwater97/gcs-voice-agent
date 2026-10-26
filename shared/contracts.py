@@ -6,7 +6,7 @@ Agent 参数校验、MCP Schema 与模拟任务操作共用这些模型：
 1. 任务类型 TASK_TYPES：task_type 判别，注册任务级模型；
 2. 放飞模式 LAUNCH_MODES：mode 判别，注册放飞前出任务的参数模型；
 3. 编队类型 FORMATION_TYPES：formation_type 判别，注册编队参数模型；
-工具动作由 assistant/tools.py 注册；MSG_TYPES 标识 Agent 对外响应的来源。
+工具动作由 assistant/tools.py 注册；MSG_TYPES 登记信封消息类型。
 
 任务状态按 TASK_STATUS_TRANSITIONS 流转：draft（创建）→ uploaded（保存并上传）
 → executing（执行）；completed / aborted 为后续执行结果预留。
@@ -141,17 +141,18 @@ class ExecuteTaskArguments(StrictModel):
 
 
 # ---- 统一业务消息：HTTP 与 MCP 的业务数据均使用 header + payload。 ----
+# Agent 对地面站的响应统一使用 AGENT_OUTPUT，种类由 payload.type 区分：asr（转写帧）、
+# task_result、clarify、error、state、health、record_start、record_status；HTTP 层错误也使用
+# AGENT_OUTPUT，错误信息放在 payload.message（code 为 HTTP 状态码）。地面站请求与 Agent↔MCP 工具消息各自保留独立类型。
 MSG_TYPES = {
     "VOICE_INPUT": "地面站提交语音", "AGENT_INPUT": "地面站提交文本",
-    "ASR_OUTPUT": "语音转写完成", "AGENT_OUTPUT": "口令处理结果",
-    "RECORD_START": "开始服务端录音", "RECORD_STOP": "结束服务端录音",
-    "RECORD_STATUS": "录音进度查询", "RECORD_START_OUTPUT": "录音监听状态",
-    "RECORD_STATUS_OUTPUT": "录音进度快照",
-    "STATE_QUERY": "查询状态", "STATE_OUTPUT": "状态快照",
-    "HEALTH_QUERY": "健康查询", "HEALTH_OUTPUT": "健康状态",
+    "AGENT_OUTPUT": "Agent 对地面站的统一响应",
+    "RECORD_COMMAND": "服务端录音控制",
+    "RECORD_STATUS": "录音进度查询",
+    "STATE_QUERY": "查询状态", "HEALTH_QUERY": "健康查询",
     "CREATE_TASK": "创建工具请求", "UPLOAD_TASK": "上传工具请求",
     "EXECUTE_TASK": "执行工具请求", "TASK_RESULT": "工具成功结果",
-    "ERROR": "请求错误",
+    "ERROR": "MCP 工具失败响应",
 }
 MessageType = Literal[tuple(MSG_TYPES)]
 MsgId = Annotated[str, Field(
@@ -193,6 +194,10 @@ class EmptyPayload(StrictModel):
     pass
 
 
+class RecordCommandPayload(StrictModel):
+    type: Literal["record_start", "record_stop"]
+
+
 class TaskIdPayload(StrictModel):
     task_id: TaskId
 
@@ -218,9 +223,24 @@ class ExecuteTaskResult(StrictModel):
 # ---- 地面站只接收本次操作结果；完整状态另行查询。 ----
 ToolName = Literal["create_task", "upload_task", "execute_task"]
 
+# Agent → 地面站响应统一在 payload 携带 code + message：成功和澄清响应为 200，
+# 业务错误和 HTTP 层错误使用非 200 错误码，错误响应不设置 payload.type。
+REPLY_STATUS: dict[str, tuple[int, str]] = {
+    "record_start": (200, "开始监听"),
+    "record_status": (200, "监听状态"),
+    "asr": (200, "识别成功"),
+    "task_result": (200, "操作成功"),
+    "clarify": (200, "需要补充参数"),
+    "error": (500, "操作失败"),
+    "state": (200, "状态查询成功"),
+    "health": (200, "服务正常"),
+}
+
 
 class AgentTaskReply(StrictModel):
     type: Literal["task_result"]
+    code: int = REPLY_STATUS["task_result"][0]
+    message: str = REPLY_STATUS["task_result"][1]
     tool: ToolName
     task_id: TaskId
     status: Literal["draft", "uploaded", "executing"]
@@ -229,11 +249,15 @@ class AgentTaskReply(StrictModel):
 
 class AgentClarifyReply(StrictModel):
     type: Literal["clarify"]
+    code: int = REPLY_STATUS["clarify"][0]
+    message: str = REPLY_STATUS["clarify"][1]
     text: str
 
 
 class AgentErrorReply(StrictModel):
     type: Literal["error"]
+    code: int = REPLY_STATUS["error"][0]
+    message: str = REPLY_STATUS["error"][1]
     text: str
     tool: ToolName | None = None
 

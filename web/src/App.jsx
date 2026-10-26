@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AudioLines, CircleHelp, RadioTower, RefreshCw, ShieldCheck, Terminal, Wifi, WifiOff } from 'lucide-react';
+import { AudioLines, CircleHelp, RadioTower, ShieldCheck, Terminal } from 'lucide-react';
 import ChatPanel from './components/ChatPanel.jsx';
 import TaskPanel from './components/TaskPanel.jsx';
-import { getHealth, getRecordStatus, getState, sendText, startRecord, stopRecord } from './lib/api.js';
+import { getRecordStatus, getState, sendText, startRecord, stopRecord } from './lib/api.js';
 import { nextMsgId } from './lib/msgId.js';
 
 const EMPTY = { tasks: [], changes: [], pending: null, revision: -1 };
@@ -13,8 +13,6 @@ export default function App() {
   const [state, setState] = useState(EMPTY);
   const [messages, setMessages] = useState([]);
   const [phase, setPhase] = useState('idle');
-  const [connection, setConnection] = useState('connecting');
-  const [connectionError, setConnectionError] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [level, setLevel] = useState(0);
   const [seconds, setSeconds] = useState(0);
@@ -28,7 +26,6 @@ export default function App() {
   const currentState = useRef(EMPTY);
   const stopRef = useRef(null);
   const shownTranscripts = useRef(new Set());
-  const online = connection === 'online';
 
   const addMessage = useCallback(message => {
     if (mounted.current) setMessages(previous => [...previous, { id: crypto.randomUUID(), at: new Date().toISOString(), ...message }]);
@@ -47,22 +44,11 @@ export default function App() {
 
   useEffect(() => {
     mounted.current = true;
-    let active = true, timer;
-    const sync = async () => {
-      try {
-        const [health, snapshot] = await Promise.all([getHealth(), getState()]);
-        if (!active) return;
-        if (health.status !== 'ok') throw new Error('Agent 健康检查未通过');
-        setConnection('online'); setConnectionError(''); applyState(snapshot);
-      } catch (error) {
-        if (active) { setConnection('offline'); setConnectionError(error.message); }
-      } finally {
-        if (active) timer = setTimeout(sync, 3000);
-      }
-    };
-    sync();
+    let active = true;
+    // 不再轮询任务状态与健康状态：仅在挂载时同步一次，用于恢复已有任务列表。
+    getState().then(snapshot => { if (active) applyState(snapshot); }).catch(() => {});
     return () => {
-      active = false; mounted.current = false; clearTimeout(timer);
+      active = false; mounted.current = false;
       if (polling.current) clearInterval(polling.current);
     };
   }, [applyState]);
@@ -87,10 +73,15 @@ export default function App() {
       }
       if (!mounted.current) return;
       const result = response.payload;
+      if (typeof result.code === 'number' && result.code >= 400) {
+        addMessage({ type: 'error', text: result.message || '操作失败。' });
+        setRetry(null);
+        return;
+      }
       addMessage(result);
       if (result.type === 'task_result') setSelectedId(result.task_id);
       setRetry(null);
-      // 查询失败不把已成功的操作标记为可重试，后续轮询仍会继续同步。
+      // 查询失败不把已成功的操作标记为可重试；任务面板可在下次操作后再同步。
       try { applyState(await getState()); }
       catch { addMessage({ type: 'notice', text: '操作结果已收到，任务面板等待下一次同步。' }); }
     } catch (error) {
@@ -115,7 +106,7 @@ export default function App() {
         setLevel(payload.level ?? 0);
         setSeconds(payload.seconds ?? 0);
         if (payload.max_seconds) setMaxSeconds(payload.max_seconds);
-        // 服务端到 90 秒上限会自动停录，以 listening 为准收尾。
+        // 服务端到录音上限会自动停录，以状态接口的 listening 为准收尾。
         if (!payload.listening) { stopPolling(); stopRef.current(); }
       } catch { /* 录音期间的轮询失败不打断本次录音，下一轮重试 */ }
     }, STATUS_POLL_MS);
@@ -132,14 +123,15 @@ export default function App() {
 
   const toggleRecording = async () => {
     if (phase === 'recording') { await stopRecording(); return; }
-    if (busy.current || !online) return;
+    if (busy.current) return;
     busy.current = true; setRetry(null); setPhase('requesting');
     try {
       const frame = await startRecord(await nextMsgId());
       if (!mounted.current) return;
-      if (!frame.payload.listening) throw new Error('麦克风监听未开启，请重试。');
+      if (frame.payload.code !== 200) {
+        throw new Error(frame.payload.message || '麦克风监听未开启，请重试。');
+      }
       setLevel(0); setSeconds(0);
-      if (frame.payload.max_seconds) setMaxSeconds(frame.payload.max_seconds);
       setPhase('recording');
       startPolling();
     } catch (error) {
@@ -150,14 +142,14 @@ export default function App() {
   };
 
   const submitText = async text => {
-    if (busy.current || !online) return;
+    if (busy.current) return;
     busy.current = true; setRetry(null); setPhase('thinking');
     addMessage({ type: 'user', source: 'text', text });
     try { await processRequest({ kind: 'text', text, msgId: await nextMsgId() }); }
     catch (error) { busy.current = false; setPhase('idle'); addMessage({ type: 'error', text: error.message }); }
   };
   const retryRequest = () => {
-    if (busy.current || !retry || !online) return;
+    if (busy.current || !retry) return;
     busy.current = true; processRequest(retry);
   };
 
@@ -167,20 +159,16 @@ export default function App() {
       <span className="rail-label">GCS</span><div className="rail-bottom"><button title="使用说明" aria-label="使用说明" onClick={() => setShowHelp(true)}><CircleHelp size={19} /></button><span className="station-avatar">01</span></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="brand"><strong>地面站<span> / </span>任务控制台</strong><span className="environment-tag">SIMULATION</span></div>
-        <div className="connection" title={connectionError || 'Agent 服务连接正常'}>{online ? <Wifi size={14} /> : connection === 'connecting' ? <RefreshCw size={14} className="spin" /> : <WifiOff size={14} />}
-          <span>{online ? 'Agent 已连接' : connection === 'connecting' ? '正在连接 Agent' : 'Agent 未连接'}</span></div>
-      </header>
+      <header className="topbar"><div className="brand"><strong>地面站<span> / </span>任务控制台</strong><span className="environment-tag">SIMULATION</span></div></header>
       <main>
         <div className="page-intro"><div><div className="eyebrow">GROUND CONTROL STATION</div><h1>任务工作台<span>Mission workspace</span></h1><p>通过自然语言编排任务，实时查看执行反馈。</p></div>
           <div className="simulation-notice"><ShieldCheck size={16} /><span>本地模拟环境<br /><small>任务操作仅作用于模拟服务</small></span></div>
         </div>
-        {!online && connection !== 'connecting' && <div className="connection-banner" role="status"><WifiOff size={15} /><span>Agent 服务尚未连接。请启动 <code>python main.py web</code>，页面会自动重连。</span></div>}
-        <div className="panels"><ChatPanel messages={messages} phase={phase} level={level} seconds={seconds} maxSeconds={maxSeconds} pending={state.pending} online={online} onRecord={toggleRecording} onText={submitText} retry={retry} onRetry={retryRequest} />
-          <TaskPanel tasks={state.tasks} changes={state.changes || []} selectedId={selectedId} onSelect={setSelectedId} syncing={!REST_PHASES.has(phase)} online={online} />
+        <div className="panels"><ChatPanel messages={messages} phase={phase} level={level} seconds={seconds} maxSeconds={maxSeconds} pending={state.pending} onRecord={toggleRecording} onText={submitText} retry={retry} onRetry={retryRequest} />
+          <TaskPanel tasks={state.tasks} changes={state.changes || []} selectedId={selectedId} onSelect={setSelectedId} syncing={!REST_PHASES.has(phase)} />
         </div>
       </main>
-      <footer><span><span className={`status-dot ${online ? 'green' : ''}`} />{online ? '工作站就绪' : '等待服务连接'}</span><span><AudioLines size={12} />ASR → Agent → MCP</span><span>GS-01<span className="footer-divider">/</span>模拟地面站</span></footer>
+      <footer><span><AudioLines size={12} />ASR → Agent → MCP</span><span>GS-01<span className="footer-divider">/</span>模拟地面站</span></footer>
     </div>
     {showHelp && <div className="modal-backdrop" onClick={() => setShowHelp(false)}><section className="help-modal" role="dialog" aria-modal="true" aria-label="使用说明" onClick={event => event.stopPropagation()}>
       <h2>使用说明</h2><p>1. 点击「点击说话」，服务端开始监听麦克风。</p><p>2. 说出任务口令，再点击「结束并发送」。单次最多录音 {Math.round(maxSeconds / 60)} 分钟，到时自动结束。</p><p>3. 录音只发送一次，识别文字先显示，Agent 继续处理后再显示澄清或任务结果。</p><p>4. 在右侧选择任务，查看状态、完整参数和变化记录。</p><p>当前支持创建、上传和模拟执行任务。参数编辑工具尚未接入。任务和变化记录在 Agent 本次运行期间保留；重启 Agent 将清空会话。</p><button autoFocus onClick={() => setShowHelp(false)}>知道了</button>

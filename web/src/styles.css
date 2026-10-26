@@ -205,13 +205,6 @@ code,
   border-radius: 3px;
   background: #1c2621;
 }
-.connection {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: #93aa9d;
-}
 .workspace main {
   padding: 29px 34px 24px;
   max-width: 1720px;
@@ -1188,23 +1181,6 @@ h1 span {
   margin: 0 5px;
   color: #354e3e;
 }
-.connection-banner {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 11px;
-  color: #c2b38e;
-  background: #302e22;
-  border: 1px solid #4c4530;
-  padding: 11px 15px;
-  border-radius: 5px;
-  margin-bottom: 15px;
-  line-height: 1.7;
-}
-.connection-banner code {
-  font-size: 10px;
-  color: #dbcb9f;
-}
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1361,10 +1337,6 @@ h1 span {
   .brand strong span {
     margin: 0 4px;
   }
-  .connection {
-    font-size: 9px;
-    gap: 5px;
-  }
   .environment-tag {
     font-size: 7px;
   }
@@ -1427,12 +1399,6 @@ h1 span {
     font-size: 6px;
     padding: 4px;
   }
-  .connection {
-    font-size: 8px;
-  }
-  .connection svg {
-    width: 12px;
-  }
   .workspace main {
     padding: 22px 14px 16px;
   }
@@ -1475,11 +1441,8 @@ h1 span {
     padding: 12px 15px;
     font-size: 8px;
   }
-  .workspace footer > span:nth-child(2) {
+  .workspace footer > span:nth-child(1) {
     display: none;
-  }
-  .connection-banner {
-    font-size: 10px;
   }
   .task-item {
     padding: 12px;

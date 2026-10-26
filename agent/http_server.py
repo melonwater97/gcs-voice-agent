@@ -22,8 +22,9 @@ from integrations.mcp_client import MCPSession
 from shared.config import AssistantConfig
 from shared.reporting import log
 from .service import AgentService
-from shared.contracts import Message, MessageHeader, VoiceInput, TextInput, EmptyPayload
-from shared.messages import AGENT, make_message, check_route
+from shared.contracts import (Message, MessageHeader, VoiceInput, TextInput,
+                              EmptyPayload, RecordCommandPayload)
+from shared.messages import AGENT, agent_error, agent_output, check_route
 
 MAX_VOICE_BYTES = 8 * 1024 * 1024  # 16k/16bit/单声道约 1.92MB/分钟，8MB ≈ 4 分钟
 MAX_TEXT_BYTES = 64 * 1024
@@ -152,9 +153,12 @@ def build_runtime(config: AssistantConfig, host: str, port: int,
 class AgentHandler(BaseHTTPRequestHandler):
     request_header: MessageHeader | None = None
 
-    def reply(self, status: int, body: dict, msg_type: str = "ERROR") -> None:
+    def reply(self, status: int, body: dict) -> None:
         if "header" not in body:
-            body = make_message(msg_type, body, request=self.request_header)
+            # 语义响应按 payload.type 补 code + message；其余（HTTP 层错误）只留 code + message。
+            body = (agent_output(body, request=self.request_header) if "type" in body
+                    else agent_error(status, body.get("error", "请求处理失败"),
+                                     request=self.request_header))
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -175,8 +179,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         routes = {
             "/api/voice": ("VOICE_INPUT", VoiceInput),
             "/api/text": ("AGENT_INPUT", TextInput),
-            "/api/record/start": ("RECORD_START", EmptyPayload),
-            "/api/record/stop": ("RECORD_STOP", EmptyPayload),
+            "/api/record": ("RECORD_COMMAND", RecordCommandPayload),
             "/api/record/status": ("RECORD_STATUS", EmptyPayload),
             "/api/state": ("STATE_QUERY", EmptyPayload),
             "/health": ("HEALTH_QUERY", EmptyPayload),
@@ -192,23 +195,25 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/voice":
                 self.handle_voice(message)
-            elif path == "/api/record/start":
-                status, body = self.submit(self.server.service.handle_record_start(message.header))
-                self.reply(status, body)
             elif path == "/api/record/status":
                 status, body = self.submit(self.server.service.handle_record_status(message.header))
                 self.reply(status, body)
-            elif path == "/api/record/stop":
-                self.handle_record_stop(message)
+            elif path == "/api/record":
+                if message.payload.type == "record_start":
+                    status, body = self.submit(
+                        self.server.service.handle_record_start(message.header))
+                    self.reply(status, body)
+                else:
+                    self.handle_record_stop(message)
             elif path == "/api/text":
                 status, body = self.submit(self.server.service.handle_text(
                     message.header, message.payload.text))
                 self.reply(status, body)
             elif path == "/api/state":
-                self.reply(200, self.submit(self.server.service.get_state()), "STATE_OUTPUT")
+                self.reply(200, self.submit(self.server.service.get_state()))
             else:
-                self.reply(200, {"status": "ok", "service": "agent-web",
-                    "asr_ready": self.server.service.asr_model is not None}, "HEALTH_OUTPUT")
+                self.reply(200, {"type": "health", "status": "ok", "service": "agent-web",
+                    "asr_ready": self.server.service.asr_model is not None})
         except TimeoutError:
             # 不取消可能已产生业务副作用的协程；调用方用原编号重试取得缓存回执。
             self.reply(504, {"error":
@@ -262,7 +267,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 message.header, on_transcript))
 
     def stream_ndjson(self, message, run, cleanup=None) -> None:
-        """语音与录音共用的分阶段响应：先 ASR_OUTPUT，后 AGENT_OUTPUT。
+        """语音与录音共用的分阶段响应：两帧都是 AGENT_OUTPUT，先 payload.type=asr，后本次结果。
 
         `run(on_transcript)` 返回最终 (status, body)；请求连接关闭后也继续完成
         Agent 流程并缓存结果，不因断线重复执行工具。`cleanup` 在协程结束时执行。
@@ -276,8 +281,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 updates.put((status, body, True))
             except Exception as exc:
                 log("错误", f"语音处理失败：{exc}")
-                updates.put((500, make_message("ERROR", {"error": "语音处理失败，请查看任务状态后使用原消息编号重试。"},
-                                               request=message.header), True))
+                updates.put((500, agent_error(500, "语音处理失败，请查看任务状态后使用原消息编号重试。",
+                                              request=message.header), True))
             finally:
                 if cleanup is not None:
                     cleanup()
@@ -290,8 +295,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 try:
                     status, body, done = updates.get(timeout=max(0, deadline - time.monotonic()))
                 except queue.Empty:
-                    body = make_message("ERROR", {"error": "Agent 等待超时，请先查看任务状态；重试时沿用原消息编号。"},
-                                        request=message.header)
+                    body = agent_error(504, "Agent 等待超时，请先查看任务状态；重试时沿用原消息编号。",
+                                       request=message.header)
                     if not streaming:
                         self.reply(504, body)
                         return

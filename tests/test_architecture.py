@@ -198,7 +198,7 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
                     await model.propose([{"role": "user", "content": EXAMPLE}], [])
         model = LocalModel(transport=httpx.MockTransport(
             lambda request: httpx.Response(503)))
-        with self.assertRaisesRegex(ValueError, "oMLX 请求失败"):
+        with self.assertRaisesRegex(ValueError, "模型服务返回 503"):
             await model.propose([{"role": "user", "content": EXAMPLE}], [])
 
     async def test_deepseek_model_sends_auth_header_and_returns_message(self):
@@ -215,7 +215,7 @@ class ArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await model.propose(messages, []), message(VALID))
         cloud = DeepSeekModel(api_key="test-key", transport=httpx.MockTransport(
             lambda request: httpx.Response(401)))
-        with self.assertRaisesRegex(ValueError, "DeepSeek 请求失败"):
+        with self.assertRaisesRegex(ValueError, "模型服务返回 401"):
             await cloud.propose(messages, [])
 
     async def test_deepseek_config_switches_defaults_and_requires_key(self):

@@ -20,7 +20,7 @@ from inputs.recorder import create_recorder
 from shared.contracts import (MessageHeader, AgentTaskReply, AgentClarifyReply,
                               AgentErrorReply)
 from shared.reporting import error_details, log
-from shared.messages import make_message
+from shared.messages import agent_error, agent_output
 
 DEDUP_CAPACITY = 256
 
@@ -59,20 +59,20 @@ class AgentService:
             if self.recorder is None:
                 self.recorder = self.recorder_factory(self.max_seconds)
             try:
-                snapshot = await asyncio.get_running_loop().run_in_executor(
+                await asyncio.get_running_loop().run_in_executor(
                     self.record_pool, self.recorder.open)
             except Exception as exc:
                 self.recorder = None
                 log("录音", "打开麦克风失败：" + error_details(exc))
-                return 503, make_message("ERROR", {"error": f"无法开启麦克风：{exc}"}, request=header)
-            return 200, make_message("RECORD_START_OUTPUT", snapshot, request=header)
+                return 503, agent_error(503, f"无法开启麦克风：{exc}", request=header)
+            return 200, agent_output({"type": "record_start"}, request=header)
 
     async def handle_record_status(self, header: MessageHeader) -> tuple[int, dict]:
         # 纯读取，不加 record_lock：轮询不能被转写阻塞。
         recorder = self.recorder
         snapshot = recorder.snapshot() if recorder is not None else {
             "listening": False, "level": 0.0, "seconds": 0.0, "max_seconds": self.max_seconds}
-        return 200, make_message("RECORD_STATUS_OUTPUT", snapshot, request=header)
+        return 200, agent_output({"type": "record_status", **snapshot}, request=header)
 
     async def handle_record_stop(self, header: MessageHeader,
                                  on_transcript=None) -> tuple[int, dict]:
@@ -86,14 +86,14 @@ class AgentService:
                 return cached
             recorder = self.recorder
             if recorder is None:
-                return 422, make_message("ERROR", {"error": "当前没有进行中的录音"}, request=header)
+                return 422, agent_error(422, "当前没有进行中的录音", request=header)
             try:
                 wav_path = await asyncio.get_running_loop().run_in_executor(
                     self.record_pool, recorder.finish)
             except Exception as exc:
                 self.recorder = None
                 log("录音", "结束录音失败：" + error_details(exc))
-                return 422, make_message("ERROR", {"error": f"结束录音失败：{exc}"}, request=header)
+                return 422, agent_error(422, f"结束录音失败：{exc}", request=header)
             self.recorder = None
             try:
                 return await self._handle_audio(header, wav_path, on_transcript, "record")
@@ -107,12 +107,12 @@ class AgentService:
             if cached is not None:
                 return cached
             payload = await self._process_text(header, text)
-            body = make_message("AGENT_OUTPUT", payload, request=header)
+            body = agent_output(payload, request=header)
             return self._dedup_put(cache_key, 200, body)
 
     async def _handle_audio(self, header: MessageHeader, wav_path: Path,
                             on_transcript, prefix: str) -> tuple[int, dict]:
-        """语音与录音共用的「转写 → ASR_OUTPUT → Agent → AGENT_OUTPUT」。"""
+        """语音与录音共用的「转写 → asr 帧 → Agent → 结果帧」，两帧都是 AGENT_OUTPUT。"""
         key = self._audio_key(prefix, header)
         cached = self._dedup_get(key)
         if cached is not None:
@@ -127,19 +127,19 @@ class AgentService:
                     self.asr_model, wav_path, task_names=task_names))
         except Exception as exc:
             log("ASR", "转写失败：" + error_details(exc))
-            return self._dedup_put(key, 500, make_message("ERROR", {"error": f"语音识别失败：{exc}"}, request=header))
+            return self._dedup_put(key, 500, agent_error(500, f"语音识别失败：{exc}", request=header))
         if not text:
             return self._dedup_put(key, 422,
-                                   make_message("ERROR", {"error": "没有识别到文本，请重试"}, request=header))
+                                   agent_error(422, "没有识别到文本，请重试", request=header))
         log("ASR", "转写：" + text)
-        transcript = make_message("ASR_OUTPUT", {"text": text}, request=header)
+        transcript = agent_output({"type": "asr", "text": text}, request=header)
         self._transcripts[key] = transcript
         if on_transcript is not None:
             on_transcript(transcript)
         # ASR 文本直接交给同一 Agent，不经浏览器重新提交。
         async with self.chat_lock:
             payload = await self._process_text(header, text)
-        body = make_message("AGENT_OUTPUT", payload, request=header)
+        body = agent_output(payload, request=header)
         return self._dedup_put(key, 200, body)
 
     @staticmethod
@@ -175,7 +175,7 @@ class AgentService:
         return self._snapshot()
 
     def _snapshot(self) -> dict:
-        return deepcopy({"session_id": self.session_id, "revision": self.revision,
+        return deepcopy({"type": "state", "session_id": self.session_id, "revision": self.revision,
                          "tasks": list(self._tasks.values()), "changes": self._changes,
                          "last_task": self.assistant.last_task,
                          "pending": self.assistant.pending})

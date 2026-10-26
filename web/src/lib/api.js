@@ -2,11 +2,11 @@ import { nextMsgId } from './msgId.js';
 
 const FRONT = { type: 'FRONT', id: 'GS-01' };
 const AGENT = { type: 'BACKGROUND', id: 'AGENT-01' };
-const RESPONSE_TYPES = {
-  VOICE_INPUT: 'AGENT_OUTPUT', AGENT_INPUT: 'AGENT_OUTPUT',
-  RECORD_START: 'RECORD_START_OUTPUT', RECORD_STATUS: 'RECORD_STATUS_OUTPUT',
-  STATE_QUERY: 'STATE_OUTPUT', HEALTH_QUERY: 'HEALTH_OUTPUT',
-};
+// Agent 的所有响应统一为 AGENT_OUTPUT，具体种类由 payload.type 区分：
+// asr（转写帧）、task_result、clarify、error、state、record_start、record_status；
+// 每个响应都带 code + message；成功和澄清为 200，错误通过非 200 的 code 表示。
+// HTTP 层错误也用 AGENT_OUTPUT，错误信息在 payload.message。
+const OUTPUT_TYPE = 'AGENT_OUTPUT';
 const MSG_ID = /^MSG-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function makeMessage(msgType, payload, msgId = nextMsgId()) {
@@ -14,10 +14,10 @@ export function makeMessage(msgType, payload, msgId = nextMsgId()) {
     src: FRONT, dst: AGENT }, payload };
 }
 
-function validateMessage(body, message, allowedTypes) {
+function validateMessage(body) {
   const header = body?.header;
   if (!header || !MSG_ID.test(header.msg_id) || header.version !== '1.0.0'
-      || !allowedTypes.includes(header.msg_type)
+      || header.msg_type !== OUTPUT_TYPE
       || header.src?.id !== AGENT.id || header.src?.type !== AGENT.type
       || header.dst?.id !== FRONT.id || header.dst?.type !== FRONT.type
       || !body.payload || typeof body.payload !== 'object' || Array.isArray(body.payload)) {
@@ -26,7 +26,7 @@ function validateMessage(body, message, allowedTypes) {
   return body;
 }
 
-export async function readVoiceStream(response, message, onTranscript = () => {}) {
+export async function readVoiceStream(response, onTranscript = () => {}) {
   if (!response.headers.get('content-type')?.startsWith('application/x-ndjson') || !response.body) {
     throw Object.assign(new Error('Agent 未返回语音分阶段响应。'), { retryable: true });
   }
@@ -45,16 +45,17 @@ export async function readVoiceStream(response, message, onTranscript = () => {}
         let frame;
         try { frame = JSON.parse(line); }
         catch { throw Object.assign(new Error('Agent 语音响应格式无效。'), { retryable: true }); }
-        validateMessage(frame, message, ['ASR_OUTPUT', 'AGENT_OUTPUT', 'ERROR']);
-        if (frame.header.msg_type === 'ERROR') {
-          throw Object.assign(new Error(frame.payload.error || 'Agent 语音处理失败。'), { retryable: true });
-        }
-        if (frame.header.msg_type === 'ASR_OUTPUT') {
+        validateMessage(frame);
+        if (frame.payload.type === 'asr') {
           if (transcribed || typeof frame.payload.text !== 'string' || !frame.payload.text.trim()) {
             throw Object.assign(new Error('Agent 转写响应无效。'), { retryable: true });
           }
           transcribed = true;
           onTranscript(frame);
+        } else if (typeof frame.payload.code === 'number' && frame.payload.code >= 400) {
+          throw Object.assign(new Error(frame.payload.message || 'Agent 语音处理失败。'), {
+            retryable: [502, 503, 504].includes(frame.payload.code),
+          });
         } else {
           if (!transcribed) throw Object.assign(new Error('Agent 缺少语音转写响应。'), { retryable: true });
           completed = true;
@@ -78,15 +79,16 @@ async function request(path, message, timeout = 190000, onTranscript) {
       body: JSON.stringify(message), signal: controller.signal, cache: 'no-store' });
     if (!response.ok) {
       const body = await response.json().catch(() => null);
-      const error = new Error(body?.payload?.error || `服务请求失败（${response.status}），请检查 Agent 是否已启动。`);
+      const error = new Error(body?.payload?.message || `服务请求失败（${response.status}），请检查 Agent 是否已启动。`);
       error.retryable = [502, 503, 504].includes(response.status);
       throw error;
     }
-    if (message.header.msg_type === 'VOICE_INPUT' || message.header.msg_type === 'RECORD_STOP') {
-      return await readVoiceStream(response, message, onTranscript);
+    if (message.header.msg_type === 'VOICE_INPUT'
+        || (message.header.msg_type === 'RECORD_COMMAND'
+          && message.payload.type === 'record_stop')) {
+      return await readVoiceStream(response, onTranscript);
     }
-    return validateMessage(await response.json().catch(() => null), message,
-      [RESPONSE_TYPES[message.header.msg_type]]);
+    return validateMessage(await response.json().catch(() => null));
   } catch (error) {
     if (error.name === 'AbortError') throw Object.assign(new Error('请求超时。任务可能仍在处理中，请查看任务面板，避免重复发送。'), { retryable: true });
     if (error instanceof TypeError) throw Object.assign(new Error('无法连接 Agent，请检查 Agent 服务是否已启动。'), { retryable: true });
@@ -96,10 +98,10 @@ async function request(path, message, timeout = 190000, onTranscript) {
   }
 }
 
-export const startRecord = msgId => request('/api/record/start', makeMessage('RECORD_START', {}, msgId), 10000);
-export const stopRecord = (msgId, onTranscript) => request('/api/record/stop', makeMessage(
-  'RECORD_STOP', {}, msgId), 190000, onTranscript);
+export const startRecord = msgId => request('/api/record', makeMessage(
+  'RECORD_COMMAND', { type: 'record_start' }, msgId), 10000);
+export const stopRecord = (msgId, onTranscript) => request('/api/record', makeMessage(
+  'RECORD_COMMAND', { type: 'record_stop' }, msgId), 190000, onTranscript);
 export const getRecordStatus = msgId => request('/api/record/status', makeMessage('RECORD_STATUS', {}, msgId), 5000);
 export const sendText = (text, msgId) => request('/api/text', makeMessage('AGENT_INPUT', { text }, msgId));
 export const getState = async () => (await request('/api/state', makeMessage('STATE_QUERY', {}), 5000)).payload;
-export const getHealth = async () => (await request('/health', makeMessage('HEALTH_QUERY', {}), 5000)).payload;

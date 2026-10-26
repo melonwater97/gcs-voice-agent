@@ -73,7 +73,7 @@ class SequentialModel:
 
 
 MSG_TYPES = {"/api/voice": "VOICE_INPUT", "/api/text": "AGENT_INPUT",
-             "/api/record/start": "RECORD_START", "/api/record/stop": "RECORD_STOP",
+             "/api/record": "RECORD_COMMAND",
              "/api/record/status": "RECORD_STATUS",
              "/api/state": "STATE_QUERY", "/health": "HEALTH_QUERY"}
 
@@ -84,7 +84,8 @@ def post(base, path, payload, msg_id=None, **overrides):
     if response.headers.get("content-type", "").startswith("application/x-ndjson"):
         frames = [json.loads(line) for line in response.iter_lines() if line]
         assert len(frames) == 2
-        assert [frame["header"]["msg_type"] for frame in frames] == ["ASR_OUTPUT", "AGENT_OUTPUT"]
+        assert [frame["header"]["msg_type"] for frame in frames] == ["AGENT_OUTPUT", "AGENT_OUTPUT"]
+        assert frames[0]["payload"]["type"] == "asr"
         for frame in frames:
             Message[dict].model_validate(frame)
         response = httpx.Response(response.status_code, json=frames[-1],
@@ -98,13 +99,16 @@ def voice_payload(audio=None):
 
 
 class AgentServerTests(unittest.TestCase):
-    def assert_message(self, response, msg_type, status=200):
+    def assert_output(self, response, status=200, output_type=None):
+        """所有 Agent 响应都是 AGENT_OUTPUT 信封，种类由 payload.type 表示。"""
         self.assertEqual(response.status_code, status, response.text)
         body = Message[dict].model_validate(response.json())
         self.assertEqual(set(response.json()), {"header", "payload"})
-        self.assertEqual(body.header.msg_type, msg_type)
+        self.assertEqual(body.header.msg_type, "AGENT_OUTPUT")
         self.assertEqual(body.header.src.model_dump(), AGENT)
         self.assertEqual(body.header.dst.model_dump(), FRONT)
+        if output_type is not None:
+            self.assertEqual(body.payload.get("type"), output_type)
         return body.payload
 
     def test_state_restores_all_three_stages_without_model_call(self):
@@ -116,10 +120,10 @@ class AgentServerTests(unittest.TestCase):
             for command in (EXAMPLE, "上传任务", "执行任务"):
                 msg_id = next_msg_id()
                 response = post(base, "/api/text", {"text": command}, msg_id)
-                result = self.assert_message(response, "AGENT_OUTPUT")
+                result = self.assert_output(response)
                 TypeAdapter(AgentReply).validate_python(result)
                 self.assertEqual(result["task"], VALID["task"])
-                self.assertEqual(set(result), {"type", "tool", "task_id", "status", "task"})
+                self.assertEqual(set(result), {"type", "code", "message", "tool", "task_id", "status", "task"})
                 snapshots.append(post(base, "/api/state", {}).json()["payload"])
             restored = post(base, "/api/state", {}).json()["payload"]
             self.assertEqual(restored, snapshots[-1])
@@ -157,8 +161,9 @@ class AgentServerTests(unittest.TestCase):
                 patch("agent.http_server.LocalModel", Model), running_agent(Path(directory)) as base, \
                 patch("inputs.speech.transcribe_file", return_value=EXAMPLE) as transcribe:
             first = post(base, "/api/voice", voice_payload(), REQUEST_ID)
-            body = self.assert_message(first, "AGENT_OUTPUT")
-            self.assertEqual(first.extensions["voice_frames"][0]["payload"], {"text": EXAMPLE})
+            body = self.assert_output(first)
+            self.assertEqual(first.extensions["voice_frames"][0]["payload"],
+                             {"type": "asr", "code": 200, "message": "识别成功", "text": EXAMPLE})
             self.assertEqual(body["tool"], "create_task")
             self.assertEqual(body["type"], "task_result")
             self.assertEqual(body["task"], VALID["task"])
@@ -214,8 +219,9 @@ class AgentServerTests(unittest.TestCase):
                     self.assertTrue(response.headers["content-type"].startswith("application/x-ndjson"))
                     lines = response.iter_lines()
                     transcript = Message[dict].model_validate(json.loads(next(lines)))
-                    self.assertEqual(transcript.header.msg_type, "ASR_OUTPUT")
-                    self.assertEqual(transcript.payload, {"text": EXAMPLE})
+                    self.assertEqual(transcript.header.msg_type, "AGENT_OUTPUT")
+                    self.assertEqual(transcript.payload,
+                                     {"type": "asr", "code": 200, "message": "识别成功", "text": EXAMPLE})
                     self.assertTrue(entered.wait(1))
                     self.assertEqual(calls, [])  # 模型尚未返回，HTTP 已交付转写。
                     self.assertEqual(post(base, "/api/state", {}).json()["payload"]["tasks"], [])
@@ -267,12 +273,12 @@ class AgentServerTests(unittest.TestCase):
                 patch("agent.http_server.LocalModel", Model), running_agent(Path(directory)) as base, \
                 patch("inputs.speech.transcribe_file", return_value="上传晨曦任务"):
             response = post(base, "/api/voice", voice_payload(), REQUEST_ID)
-            body = self.assert_message(response, "AGENT_OUTPUT")
-            self.assertEqual(body["type"], "error")
-            self.assertEqual(body["tool"], "upload_task")
-            self.assertEqual(response.extensions["voice_frames"][0]["payload"], {"text": "上传晨曦任务"})
-            self.assertEqual(set(body), {"type", "text", "tool"})
-            TypeAdapter(AgentReply).validate_python(body)
+            body = self.assert_output(response)
+            self.assertGreaterEqual(body["code"], 400)
+            self.assertNotIn("type", body)
+            self.assertEqual(response.extensions["voice_frames"][0]["payload"],
+                             {"type": "asr", "code": 200, "message": "识别成功", "text": "上传晨曦任务"})
+            self.assertEqual(set(body), {"code", "message"})
             self.assertEqual(len(calls), 1)
             self.assertEqual(post(base, "/api/state", {}).json()["payload"]["tasks"], [])
 
@@ -281,7 +287,7 @@ class AgentServerTests(unittest.TestCase):
             for payload in (None, [], "text", 42, {"text": "hi"}, {"payload": {"text": "hi"}}):
                 response = httpx.post(base + "/api/text", content=json.dumps(payload),
                                       headers={"Content-Type": "application/json"}, trust_env=False)
-                self.assert_message(response, "ERROR", status=400)
+                self.assert_output(response, status=400)
 
     def test_header_validates_uuid_version_type_and_route(self):
         with tempfile.TemporaryDirectory() as directory, running_agent(Path(directory)) as base:
@@ -296,7 +302,7 @@ class AgentServerTests(unittest.TestCase):
                     response = httpx.post(base + "/api/text", json=request, trust_env=False)
                     self.assertEqual(response.status_code, 400)
                     Message[dict].model_validate(response.json())
-                    self.assertEqual(response.json()["header"]["msg_type"], "ERROR")
+                    self.assertEqual(response.json()["header"]["msg_type"], "AGENT_OUTPUT")
                     self.assertEqual(response.json()["header"]["src"], AGENT)
             self.assertEqual(post(base, "/api/state", {}).json()["payload"]["tasks"], [])
 
@@ -312,14 +318,15 @@ class AgentServerTests(unittest.TestCase):
 
     def test_queries_are_post_with_envelopes(self):
         with tempfile.TemporaryDirectory() as directory, running_agent(Path(directory)) as base:
-            for path, msg_type in (("/health", "HEALTH_OUTPUT"), ("/api/state", "STATE_OUTPUT")):
+            for path, output_type in (("/health", "health"), ("/api/state", "state")):
                 msg_id = next_msg_id()
-                body = self.assert_message(post(base, path, {}, msg_id), msg_type)
+                body = self.assert_output(post(base, path, {}, msg_id), output_type=output_type)
                 if path == "/health":
-                    self.assertEqual(body, {"status": "ok", "service": "agent-web", "asr_ready": True})
-                self.assert_message(httpx.get(base + path, trust_env=False), "ERROR", status=405)
+                    self.assertEqual(body, {"type": "health", "code": 200, "message": "服务正常",
+                                             "status": "ok", "service": "agent-web", "asr_ready": True})
+                self.assert_output(httpx.get(base + path, trust_env=False), status=405)
                 response = post(base, path, {"extra": True}, msg_id)
-                self.assert_message(response, "ERROR", status=400)
+                self.assert_output(response, status=400)
 
     def test_voice_clarifies_without_tool_and_preserves_transcript(self):
         Model, calls = counting_stub({"content": "请补充起飞高度。"})
@@ -327,9 +334,11 @@ class AgentServerTests(unittest.TestCase):
                 patch("agent.http_server.LocalModel", Model), running_agent(Path(directory)) as base, \
                 patch("inputs.speech.transcribe_file", return_value=EXAMPLE):
             response = post(base, "/api/voice", voice_payload(), REQUEST_ID)
-            body = self.assert_message(response, "AGENT_OUTPUT")
-            self.assertEqual(body, {"type": "clarify", "text": "请补充起飞高度。"})
-            self.assertEqual(response.extensions["voice_frames"][0]["payload"], {"text": EXAMPLE})
+            body = self.assert_output(response)
+            self.assertEqual(body, {"type": "clarify", "code": 200, "message": "需要补充参数",
+                                    "text": "请补充起飞高度。"})
+            self.assertEqual(response.extensions["voice_frames"][0]["payload"],
+                             {"type": "asr", "code": 200, "message": "识别成功", "text": EXAMPLE})
             self.assertEqual(len(calls), 1)
             state = post(base, "/api/state", {}).json()["payload"]
             self.assertEqual(state["tasks"], [])
@@ -344,10 +353,10 @@ class AgentServerTests(unittest.TestCase):
                 voice_payload(b"x" * (MAX_VOICE_BYTES + 1)),
             ):
                 response = post(base, "/api/voice", payload, REQUEST_ID)
-                self.assert_message(response, "ERROR", status=422)
+                self.assert_output(response, status=422)
             for payload in (voice_payload(b""), {"audio_format": "mp3", "audio_base64": "eA=="}):
-                self.assert_message(post(base, "/api/voice", payload, REQUEST_ID),
-                                    "ERROR", status=400)
+                self.assert_output(post(base, "/api/voice", payload, REQUEST_ID),
+                                    status=400)
             transcribe.assert_not_called()
 
     def test_asr_empty_or_failure_still_returns_error_envelope(self):
@@ -359,15 +368,15 @@ class AgentServerTests(unittest.TestCase):
                     else:
                         transcribe.return_value = result
                     msg_id = next_msg_id()
-                    self.assert_message(post(base, "/api/voice", voice_payload(), msg_id),
-                                        "ERROR", status=status)
+                    self.assert_output(post(base, "/api/voice", voice_payload(), msg_id),
+                                        status=status)
 
     def test_text_returns_only_current_task_result(self):
         with tempfile.TemporaryDirectory() as directory, openai_stub(message(VALID)) as model_url, \
                 running_agent(Path(directory), url=model_url) as base:
-            body = self.assert_message(post(base, "/api/text", {"text": EXAMPLE}, REQUEST_ID),
-                                       "AGENT_OUTPUT")
-            self.assertEqual(set(body), {"type", "tool", "task_id", "status", "task"})
+            body = self.assert_output(post(base, "/api/text", {"text": EXAMPLE}, REQUEST_ID),
+                                       )
+            self.assertEqual(set(body), {"type", "code", "message", "tool", "task_id", "status", "task"})
             self.assertEqual(body["type"], "task_result")
             self.assertEqual(body["tool"], "create_task")
             self.assertEqual(body["status"], "draft")
@@ -380,7 +389,8 @@ class AgentServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, openai_stub({"content": "请问起飞高度是多少？"}) as url, \
                 running_agent(Path(directory), url=url) as base:
             body = post(base, "/api/text", {"text": "新增原地起飞任务"}).json()["payload"]
-            self.assertEqual(body, {"type": "clarify", "text": "请问起飞高度是多少？"})
+            self.assertEqual(body, {"type": "clarify", "code": 200, "message": "需要补充参数",
+                                    "text": "请问起飞高度是多少？"})
             state = post(base, "/api/state", {}).json()["payload"]
             self.assertEqual(state["pending"], body["text"])
 
@@ -390,8 +400,9 @@ class AgentServerTests(unittest.TestCase):
             response = post(base, "/api/text", {"text": EXAMPLE})
             self.assertEqual(response.status_code, 200)
             body = response.json()["payload"]
-            self.assertEqual(body["type"], "error")
-            self.assertEqual(set(body), {"type", "text"})
+            self.assertGreaterEqual(body["code"], 400)
+            self.assertNotIn("type", body)
+            self.assertEqual(set(body), {"code", "message"})
             self.assertEqual(post(base, "/api/state", {}).json()["payload"]["tasks"], [])
 
     def test_dedup_returns_same_envelope_and_skips_llm(self):
@@ -421,18 +432,18 @@ class AgentServerTests(unittest.TestCase):
 
     def test_content_type_json_payload_and_paths_are_checked(self):
         with tempfile.TemporaryDirectory() as directory, running_agent(Path(directory)) as base:
-            self.assert_message(httpx.post(base + "/api/voice", content=wav_bytes(),
-                headers={"Content-Type": "audio/wav"}, trust_env=False), "ERROR", status=415)
-            self.assert_message(httpx.post(base + "/api/text", content=b"{",
-                headers={"Content-Type": "application/json"}, trust_env=False), "ERROR", status=400)
-            self.assert_message(httpx.post(base + "/api/text", content=b"",
-                headers={"Content-Type": "application/json"}, trust_env=False), "ERROR", status=400)
+            self.assert_output(httpx.post(base + "/api/voice", content=wav_bytes(),
+                headers={"Content-Type": "audio/wav"}, trust_env=False), status=415)
+            self.assert_output(httpx.post(base + "/api/text", content=b"{",
+                headers={"Content-Type": "application/json"}, trust_env=False), status=400)
+            self.assert_output(httpx.post(base + "/api/text", content=b"",
+                headers={"Content-Type": "application/json"}, trust_env=False), status=400)
             for payload in ({"text": "  "}, {"text": EXAMPLE, "ref_msg_id": REQUEST_ID},
                             {"text": 123}):
-                self.assert_message(post(base, "/api/text", payload, REQUEST_ID),
-                                    "ERROR", status=400)
-            self.assert_message(httpx.post(base + "/missing", json={}, trust_env=False),
-                                "ERROR", status=404)
+                self.assert_output(post(base, "/api/text", payload, REQUEST_ID),
+                                    status=400)
+            self.assert_output(httpx.post(base + "/missing", json={}, trust_env=False),
+                                status=404)
 
     def test_record_start_status_and_stop_runs_agent_once(self):
         Model, calls = counting_stub(message(VALID))
@@ -441,22 +452,22 @@ class AgentServerTests(unittest.TestCase):
                 patch("agent.http_server.LocalModel", Model), \
                 running_agent(Path(directory), recorder_factory=factory) as base, \
                 patch("inputs.speech.transcribe_file", return_value=EXAMPLE) as transcribe:
-            start = self.assert_message(post(base, "/api/record/start", {}, REQUEST_ID),
-                                        "RECORD_START_OUTPUT")
-            self.assertEqual(start, {"listening": True, "level": 0.0, "seconds": 0.0,
-                                     "max_seconds": 90})
+            start = self.assert_output(post(base, "/api/record", {"type": "record_start"}, REQUEST_ID),
+                                        output_type="record_start")
+            self.assertEqual(start, {"type": "record_start", "code": 200, "message": "开始监听"})
             status_id = next_msg_id()
-            status = self.assert_message(post(base, "/api/record/status", {}, status_id),
-                                         "RECORD_STATUS_OUTPUT")
+            status = self.assert_output(post(base, "/api/record/status", {}, status_id),
+                                         output_type="record_status")
             self.assertTrue(status["listening"])
-            stop = post(base, "/api/record/stop", {}, REQUEST_ID)
-            body = self.assert_message(stop, "AGENT_OUTPUT")
-            self.assertEqual(stop.extensions["voice_frames"][0]["payload"], {"text": EXAMPLE})
+            stop = post(base, "/api/record", {"type": "record_stop"}, REQUEST_ID)
+            body = self.assert_output(stop)
+            self.assertEqual(stop.extensions["voice_frames"][0]["payload"],
+                             {"type": "asr", "code": 200, "message": "识别成功", "text": EXAMPLE})
             self.assertEqual(body["tool"], "create_task")
             self.assertEqual(body["type"], "task_result")
             self.assertEqual(body["task"], VALID["task"])
             # 重放沿用原编号：不重复转写、不重复建任务，ASR 帧也一致
-            replay = post(base, "/api/record/stop", {}, REQUEST_ID)
+            replay = post(base, "/api/record", {"type": "record_stop"}, REQUEST_ID)
             self.assertEqual(replay.json(), stop.json())
             self.assertEqual(replay.extensions["voice_frames"], stop.extensions["voice_frames"])
             self.assertEqual(transcribe.call_count, 1)
@@ -473,9 +484,9 @@ class AgentServerTests(unittest.TestCase):
                 patch("agent.http_server.LocalModel", Model), \
                 running_agent(Path(directory), recorder_factory=factory) as base, \
                 patch("inputs.speech.transcribe_file", return_value=EXAMPLE) as transcribe:
-            post(base, "/api/record/start", {}, REQUEST_ID)
+            post(base, "/api/record", {"type": "record_start"}, REQUEST_ID)
             def send(_):
-                return post(base, "/api/record/stop", {}, REQUEST_ID).json()
+                return post(base, "/api/record", {"type": "record_stop"}, REQUEST_ID).json()
             with ThreadPoolExecutor(max_workers=3) as pool:
                 results = list(pool.map(send, range(3)))
             self.assertTrue(all(result == results[0] for result in results))
@@ -487,8 +498,8 @@ class AgentServerTests(unittest.TestCase):
         factory = FakeRecorderFactory()
         with tempfile.TemporaryDirectory() as directory, \
                 running_agent(Path(directory), recorder_factory=factory, record_max_seconds=30) as base:
-            start = post(base, "/api/record/start", {}, REQUEST_ID).json()["payload"]
-            self.assertEqual(start["max_seconds"], 30)
+            start = post(base, "/api/record", {"type": "record_start"}, REQUEST_ID).json()["payload"]
+            self.assertEqual(start, {"type": "record_start", "code": 200, "message": "开始监听"})
             factory.instances[-1].listening = False   # 模拟达到上限后服务端自动停录
             status = post(base, "/api/record/status", {}).json()["payload"]
             self.assertFalse(status["listening"])
@@ -498,18 +509,18 @@ class AgentServerTests(unittest.TestCase):
         factory = FakeRecorderFactory()
         with tempfile.TemporaryDirectory() as directory, \
                 running_agent(Path(directory), recorder_factory=factory) as base:
-            self.assert_message(post(base, "/api/record/stop", {}, REQUEST_ID),
-                                "ERROR", status=422)
+            self.assert_output(post(base, "/api/record", {"type": "record_stop"}, REQUEST_ID),
+                                status=422)
 
     def test_record_start_device_failure_returns_error(self):
         factory = FakeRecorderFactory(fail_open=True)
         with tempfile.TemporaryDirectory() as directory, \
                 running_agent(Path(directory), recorder_factory=factory) as base:
-            self.assert_message(post(base, "/api/record/start", {}, REQUEST_ID),
-                                "ERROR", status=503)
+            self.assert_output(post(base, "/api/record", {"type": "record_start"}, REQUEST_ID),
+                                status=503)
             # 打开失败不残留录音会话，后续 stop 同样报错而不是误用旧状态
-            self.assert_message(post(base, "/api/record/stop", {}, REQUEST_ID),
-                                "ERROR", status=422)
+            self.assert_output(post(base, "/api/record", {"type": "record_stop"}, REQUEST_ID),
+                                status=422)
 
     def test_record_stop_empty_or_failed_asr_returns_error(self):
         factory = FakeRecorderFactory()
@@ -522,9 +533,9 @@ class AgentServerTests(unittest.TestCase):
                     else:
                         transcribe.return_value = result
                     msg_id = next_msg_id()
-                    post(base, "/api/record/start", {}, next_msg_id())
-                    self.assert_message(post(base, "/api/record/stop", {}, msg_id),
-                                        "ERROR", status=status)
+                    post(base, "/api/record", {"type": "record_start"}, next_msg_id())
+                    self.assert_output(post(base, "/api/record", {"type": "record_stop"}, msg_id),
+                                        status=status)
 
     def test_response_routes_back_to_requesting_station(self):
         with tempfile.TemporaryDirectory() as directory, running_agent(Path(directory)) as base:

@@ -17,7 +17,7 @@ function ChangeEntry({ change }) {
   </div></div>;
 }
 
-export default function TaskPanel({ tasks, changes, selectedId, onSelect, syncing, online }) {
+export default function TaskPanel({ tasks, changes, selectedId, onSelect, syncing }) {
   const [tab, setTab] = useState('parameters');
   const selected = tasks.find(task => task.task_id === selectedId) || tasks.at(-1);
   const fields = taskFields(selected?.task);
@@ -27,7 +27,7 @@ export default function TaskPanel({ tasks, changes, selectedId, onSelect, syncin
   return <section className="panel task-panel" aria-label="任务监控">
     <div className="panel-heading"><div className="heading-icon"><Layers3 size={19} /></div>
       <div><h2>任务监控</h2><p>状态与参数，随任务同步</p></div>
-      <span className={`live-label ${online ? '' : 'offline'}`}><span className={`status-dot ${online ? 'green' : ''}`} />{syncing ? '同步中' : online ? '已连接' : '未连接'}</span>
+      <span className="live-label"><span className={`status-dot ${syncing ? '' : 'green'}`} />{syncing ? '同步中' : '已同步'}</span>
     </div>
     <div className="task-list-heading"><span>当前任务</span><span className="count">{tasks.length.toString().padStart(2, '0')}</span><span className="muted">按创建顺序</span></div>
     <div className="task-list">

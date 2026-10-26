@@ -79,7 +79,7 @@ python main.py assistant --mic
 
 ## React 模拟地面站
 
-地面站开发与联调请使用 [地面站对接接口文档](docs/地面站对接接口.md)，仅描述 React 与 Agent 的请求、响应和状态契约。内部工具契约见 [接口设计](docs/接口设计.md)。
+地面站开发与联调请使用 [地面站对接接口文档](docs/地面站对接接口.md)，只描述 React 与 Agent 的服务端录音接口（A5–A7）。语音/文字输入、任务状态、健康诊断与内部工具契约见 [接口设计](docs/接口设计.md)。
 
 React 位于 `web/`，使用 React + Vite，需要 Node.js 22 或更高版本。先按上文启动模型服务，再在项目根目录启动 Agent（非默认后端同样用 `--url` + `--model`）：
 
@@ -99,12 +99,12 @@ npm run dev
 
 不再需要 `python main.py gcs`、`18001` 端口或 MCP 到地面站的 HTTP 回调。`simulator/backend.py` 现在只是 MCP 调用的本地任务模拟模块。上传将任务写入 Agent 侧的 `output/TASK-*.json`，成功后更新为已上传；可用 `python main.py web --task-output-dir /绝对路径/任务目录` 修改保存位置，CLI 助手也支持该选项。执行只更新模拟状态。
 
-接口统一使用 **`header + payload` JSON**，消息编号为 **`MSG-<UUID>`**，header 包含 msg_id、msg_type、version、src、dst。语音也使用 JSON，完整 WAV 文件经 Base64 编码放入 payload.audio_base64，payload.audio_format 为 wav；不再直接发送音频字节。文本放在 payload.text；请求与响应的对应关系由 HTTP 请求/响应本身确定，信封不再放关联编号，也不使用 X-Msg-Id。接口均为 POST：/api/voice、/api/text、/api/record/start、/api/record/status、/api/record/stop、/api/state、/health；除 /api/voice 外的请求 payload 均可为 {}。成功和错误响应都使用同一信封。操作 payload 只含本次结果，完整任务列表和变化记录通过 /api/state 查询。内部 MCP 工具的业务参数和结果也采用该格式，MCP JSON-RPC 与模型提供方协议保持其标准格式。完整字段与示例见上述两份接口文档。
+接口统一使用 **`header + payload` JSON**，消息编号为 **`MSG-<UUID>`**，header 包含 msg_id、msg_type、version、src、dst。Agent 对地面站的所有响应统一使用 `msg_type: "AGENT_OUTPUT"`，响应种类由 `payload.type` 区分（`asr`、`task_result`、`clarify`、`error`、`state`、`health`、`record_start`、`record_status`）；错误信息在 `payload.message`。语音也使用 JSON，完整 WAV 文件经 Base64 编码放入 payload.audio_base64，payload.audio_format 为 wav；不再直接发送音频字节。文本放在 payload.text；请求与响应的对应关系由 HTTP 请求/响应本身确定，信封不再放关联编号，也不使用 X-Msg-Id。接口均为 POST：/api/voice、/api/text、/api/record、/api/record/status、/api/state、/health；录音控制通过 /api/record 的 `payload.type` 选择 `record_start` 或 `record_stop`，其余请求按接口定义携带 payload。成功和错误响应都使用同一信封。操作 payload 只含本次结果，完整任务列表和变化记录通过 /api/state 查询。内部 MCP 工具的业务参数和结果也采用该格式，MCP JSON-RPC 与模型提供方协议保持其标准格式。完整字段与示例见上述两份接口文档。
 
 - 点击「点击说话」让 Agent 开始监听麦克风，再点击「结束并发送」结束录音并识别。录音在服务端完成，浏览器不需要麦克风权限；单次录音最多 90 秒，可用 `python main.py web --record-max-seconds` 修改，到时服务端自动结束。界面用 `/api/record/status` 轮询电平与倒计时。
-- 语音接口使用 NDJSON 分阶段响应：ASR 完成后立即返回 ASR_OUTPUT（payload.text）并显示到聊天框，Agent 内部继续 LLM 和工具处理，随后返回 AGENT_OUTPUT。每条仍为 header + payload JSON，前端不回传识别文本。录音端点与 /api/voice 走同一套 Agent 流程，/api/voice 保留给自行编码 WAV 的外部地面站。
+- 语音接口使用 NDJSON 分阶段响应：ASR 完成后立即返回 `AGENT_OUTPUT`（`payload.type=asr`，`payload.text`）并显示到聊天框，Agent 内部继续 LLM 和工具处理，随后返回第二条 `AGENT_OUTPUT`（本次结果）。每条仍为 header + payload JSON，前端不回传识别文本。录音端点与 /api/voice 走同一套 Agent 流程，/api/voice 保留给自行编码 WAV 的外部地面站。
 - 对话区显示澄清问题、工具名称、成功回执或错误；操作响应不暴露内部调用参数、不重复返回全量状态。「文字输入」是可选入口，与语音共用后续处理；澄清补参也可以继续说话。
-- 任务面板展示完整参数、`草稿 → 已上传 → 执行中` 状态和变化记录。通过 /api/state 每 3 秒同步一次，操作完成后立即查询，刷新页面后恢复任务状态。
+- 任务面板展示完整参数、`草稿 → 已上传 → 执行中` 状态和变化记录。界面不周期轮询：在页面加载时和每次操作完成后查询一次 /api/state，刷新页面后恢复任务状态。
 - 任务示例：「新增放飞前出任务，原地起飞，起飞高度50米」→「上传刚才创建的任务」→「执行刚才上传的任务」。三个步骤分别执行，创建不会自动上传或执行。
 
 当前是单工作站共享会话：同一 Agent 的浏览器页面共用对话上下文与任务列表。聊天显示仅保存在当前页面；任务和最近 100 条变化保存在 Agent 内存，重启 Agent 会清空。当前 MCP 支持创建、上传和执行，尚无参数修改工具；界面展示已有参数及回执产生的变化，不模拟不存在的修改结果。执行仅更新 Agent 侧模拟状态。

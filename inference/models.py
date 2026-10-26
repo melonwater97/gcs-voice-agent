@@ -45,8 +45,14 @@ class LocalModel:
                 })
                 response.raise_for_status()
                 body = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ValueError(f"oMLX 请求失败，请检查本地模型服务：{exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            # 透传模型服务返回的原始错误（状态码 + 响应正文），便于直接定位后端问题。
+            detail = exc.response.text.strip() or str(exc)
+            raise ValueError(f"模型服务返回 {exc.response.status_code}：{detail}") from exc
+        except httpx.HTTPError as exc:
+            raise ValueError(f"模型服务请求失败：{exc}") from exc
+        except ValueError as exc:
+            raise ValueError(f"模型服务响应无效：{exc}") from exc
         return _validated_message(body)
 
 
@@ -72,6 +78,12 @@ class DeepSeekModel:
                 }, headers={"Authorization": f"Bearer {self.api_key}"})
                 response.raise_for_status()
                 body = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ValueError(f"DeepSeek 请求失败，请检查 API Key 与网络：{exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            # 透传模型服务返回的原始错误（状态码 + 响应正文），便于直接定位后端问题。
+            detail = exc.response.text.strip() or str(exc)
+            raise ValueError(f"模型服务返回 {exc.response.status_code}：{detail}") from exc
+        except httpx.HTTPError as exc:
+            raise ValueError(f"模型服务请求失败：{exc}") from exc
+        except ValueError as exc:
+            raise ValueError(f"模型服务响应无效：{exc}") from exc
         return _validated_message(body)

@@ -26,7 +26,7 @@ function Message({ message }) {
   </div>;
 }
 
-export default function ChatPanel({ messages, phase, level, seconds, maxSeconds = 90, pending, online, onRecord, onText, retry, onRetry }) {
+export default function ChatPanel({ messages, phase, level, seconds, maxSeconds = 90, pending, onRecord, onText, retry, onRetry }) {
   const [text, setText] = useState('');
   const [showText, setShowText] = useState(false);
   const bottom = useRef(null);
@@ -35,7 +35,7 @@ export default function ChatPanel({ messages, phase, level, seconds, maxSeconds 
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, phase]);
   const submit = event => {
     event.preventDefault();
-    if (!text.trim() || busy || !online) return;
+    if (!text.trim() || busy) return;
     onText(text.trim()); setText('');
   };
   return <section className="panel chat-panel" aria-label="语音助手">
@@ -60,10 +60,10 @@ export default function ChatPanel({ messages, phase, level, seconds, maxSeconds 
       <div ref={bottom} />
     </div>
     {pending && <div className="pending"><CircleAlert size={14} /><span>等待补充：{pending}</span></div>}
-    {retry && <div className="retry-line"><span>可使用同一消息编号重试，避免重复操作。</span><button disabled={busy || !online} onClick={onRetry}>重试本次请求</button></div>}
+    {retry && <div className="retry-line"><span>可使用同一消息编号重试，避免重复操作。</span><button disabled={busy} onClick={onRetry}>重试本次请求</button></div>}
     <div className={`composer ${recording ? 'is-recording' : ''}`}>
-      <div className="record-status"><span className={`status-dot ${recording ? 'red' : online ? 'green' : ''}`} />
-        <span aria-live="polite">{!online && phase === 'idle' ? '等待 Agent 连接' : PHASES[phase]}</span>
+      <div className="record-status"><span className={`status-dot ${recording ? 'red' : ''}`} />
+        <span aria-live="polite">{PHASES[phase]}</span>
         <span className="record-duration">{recording ? `${clock(seconds)} / ${clock(maxSeconds)}` : '点击开始，再次点击结束'}</span>
       </div>
       <div className="record-controls">
@@ -71,7 +71,7 @@ export default function ChatPanel({ messages, phase, level, seconds, maxSeconds 
           {Array.from({ length: 25 }, (_, index) => <i key={index} style={{ height: `${4 + (recording ? level * 42 : 5) * (0.3 + Math.abs(Math.sin(index * 2.1)) * 0.7)}px` }} />)}
         </div>
         <button className={`record-button ${recording ? 'stop' : ''}`} onClick={onRecord}
-          disabled={(!online && !recording) || (busy && !recording)} aria-label={recording ? '结束录音并发送' : '开始说话'}>
+          disabled={busy && !recording} aria-label={recording ? '结束录音并发送' : '开始说话'}>
           {recording ? <Square size={16} fill="currentColor" /> : <Mic size={19} />}<span>{recording ? '结束并发送' : busy ? '处理中…' : '点击说话'}</span>
         </button>
       </div>
@@ -82,7 +82,7 @@ export default function ChatPanel({ messages, phase, level, seconds, maxSeconds 
           maxLength={10000} onChange={event => setText(event.target.value)} onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) submit(event);
           }} rows={2} />
-        <button type="submit" aria-label="发送文字口令" disabled={!text.trim() || busy || !online}><Send size={17} /></button>
+        <button type="submit" aria-label="发送文字口令" disabled={!text.trim() || busy}><Send size={17} /></button>
       </form>}
     </div>
   </section>;
