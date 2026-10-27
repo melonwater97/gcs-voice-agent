@@ -7,7 +7,6 @@ export const MASK = '••••••••';
 export const defaults = () => ({
   model: { baseUrl: 'http://127.0.0.1:18000/v1', model: 'Ornith-1.5-35B-A3B-MLX-6bit', apiKey: '', contextWindow: 32768, maxTokens: 4096 },
   voice: { python: 'python', modelDir: '', hotwordsFile: '', device: '', maxSeconds: 90 },
-  gcs: { baseUrl: '', token: '', timeoutSeconds: 30, enabled: false },
   mcp: [], skills: [], workflows: [], general: { alwaysOnTop: false },
 });
 export function atomicJSON(file, value) {
@@ -34,9 +33,9 @@ export function mergeMasked(incoming, previous) {
   return incoming;
 }
 export function validateSettings(config) {
-  if (!config?.model || !config?.voice || !config?.gcs || !config?.general) throw new Error('配置结构不完整');
-  for (const [label, raw] of [['模型', config.model.baseUrl], ['地面站', config.gcs.baseUrl]]) {
-    if (!raw && label === '地面站') continue;
+  if (!config?.model || !config?.voice || !config?.general) throw new Error('配置结构不完整');
+  delete config.gcs;
+  for (const [label, raw] of [['模型', config.model.baseUrl]]) {
     const url = new URL(raw);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error(`${label}地址必须为 HTTP(S)，凭据请单独填写`);
   }
@@ -44,7 +43,6 @@ export function validateSettings(config) {
   if (!Number.isInteger(config.voice.maxSeconds) || config.voice.maxSeconds < 1 || config.voice.maxSeconds > 600) throw new Error('录音上限应为 1–600 秒');
   if (!Number.isInteger(config.model.maxTokens) || config.model.maxTokens < 128 || config.model.maxTokens > 32768) throw new Error('模型输出上限应为 128–32768');
   if (!Number.isInteger(config.model.contextWindow) || config.model.contextWindow < config.model.maxTokens) throw new Error('上下文窗口应不小于输出上限');
-  if (!(config.gcs.timeoutSeconds >= 1 && config.gcs.timeoutSeconds <= 300)) throw new Error('地面站超时应为 1–300 秒');
   if (config.voice.device !== '' && (!Number.isInteger(Number(config.voice.device)) || Number(config.voice.device) < 0)) throw new Error('麦克风设备编号无效');
   for (const field of ['mcp', 'skills', 'workflows']) {
     if (!Array.isArray(config[field])) throw new Error(`${field} 应为列表`);
@@ -52,7 +50,7 @@ export function validateSettings(config) {
     if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) throw new Error(`${field} 编号必须唯一`);
   }
   for (const item of config.mcp) {
-    if (!/^[a-zA-Z0-9_]{1,32}$/.test(item.name) || item.name === 'groundstation') throw new Error('MCP 名称使用字母、数字、下划线；groundstation 为内置名称');
+    if (!/^[a-zA-Z0-9_]{1,32}$/.test(item.name)) throw new Error('MCP 名称使用字母、数字、下划线');
     if (!['stdio', 'http'].includes(item.transport)) throw new Error('未知 MCP 传输类型');
     if (item.transport === 'stdio' && (!item.command || !Array.isArray(item.args))) throw new Error('stdio MCP 需要 command 和 args 数组');
     if (item.transport === 'http' && !/^https?:\/\//.test(item.url || '')) throw new Error('HTTP MCP 需要有效地址');
@@ -75,7 +73,6 @@ export class Store {
       this.config = { ...defaultsValue, ...saved,
         model: { ...defaultsValue.model, ...saved.model },
         voice: { ...defaultsValue.voice, ...saved.voice },
-        gcs: { ...defaultsValue.gcs, ...saved.gcs },
         general: { ...defaultsValue.general, ...saved.general },
         mcp: saved.mcp || [], skills: saved.skills || [], workflows: saved.workflows || [],
       };
@@ -104,7 +101,7 @@ export class Store {
   publicConfig() {
     const c = structuredClone(this.config);
     if (c.model.apiKey) c.model.apiKey = MASK;
-    if (c.gcs.token) c.gcs.token = MASK;
+    delete c.gcs;
     for (const server of c.mcp) for (const field of ['env', 'headers']) if (server[field]) server[field] = Object.fromEntries(Object.entries(server[field]).map(([k, v]) => [k, secretKey.test(k) && v ? MASK : v]));
     return c;
   }
@@ -114,7 +111,7 @@ export class Store {
     this.config = next;
     return this.publicConfig();
   }
-  secrets() { return [this.config.model.apiKey, this.config.gcs.token, ...this.config.mcp.flatMap(s => [...Object.entries(s.env || {}), ...Object.entries(s.headers || {})].filter(([key]) => secretKey.test(key)).map(([, value]) => value))]; }
+  secrets() { return [this.config.model.apiKey, this.config.gcs?.token, ...this.config.mcp.flatMap(s => [...Object.entries(s.env || {}), ...Object.entries(s.headers || {})].filter(([key]) => secretKey.test(key)).map(([, value]) => value))]; }
   safe(value) { return redact(value, this.secrets()); }
   sessionPath(id) {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('会话编号无效');

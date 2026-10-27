@@ -1,0 +1,10 @@
+# 自建 Python MCP 服务配置。模拟服务：python -m simulator.http_server
+ground_station:
+  base_url: http://127.0.0.1:18003
+  timeout_seconds: 30
+  # 接真实地面站时改为 false；此标记只影响结果说明，不会切换服务地址。
+  simulation: true
+  # 可选 Bearer Token 从环境变量读取，不将令牌写入 YAML。
+  token_env: LH_GCS_TOKEN
+  agent_id: AGENT-01
+  station_id: GS-01

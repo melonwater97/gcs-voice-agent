@@ -7,15 +7,16 @@ import { Knowledge, readSkill } from './knowledge.mjs';
 import { Engine } from './engine.mjs';
 import { Voice } from './voice.mjs';
 import { connectMcp } from './mcp.mjs';
+import { McpRuntime } from './mcp-runtime.mjs';
 import { validateWorkflow, starterWorkflow } from './workflows.mjs';
-import { prepareRuntimeConfig } from './runtime-config.mjs';
+import { prepareRuntimeConfig, managedMcpId, readMcpYaml, saveMcpYaml } from './runtime-config.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18301), dataDir = process.env.LH_DATA_DIR || path.join(root, '.data'), token = process.env.LH_BACKEND_TOKEN || '', encryptionKey = process.env.LH_CREDENTIAL_KEY } = {}) {
   const store = new Store(dataDir, encryptionKey), knowledge = new Knowledge(store), clients = new Set();
   prepareRuntimeConfig(store);
   const notify = event => { const line = `data: ${JSON.stringify(store.safe(event))}\n\n`; for (const client of clients) client.write(line); };
-  const engine = new Engine(store, knowledge, notify), voice = new Voice(store);
+  const mcp = new McpRuntime(store, notify), engine = new Engine(store, knowledge, notify, mcp), voice = new Voice(store);
   const idle = () => { engine.assertIdle(); if (voice.phase !== 'idle') throw Object.assign(new Error('请先结束语音输入'), { statusCode: 409 }); };
   async function body(req) {
     if (!req.headers['content-type']?.startsWith('application/json')) throw new Error('请求需要 application/json');
@@ -31,7 +32,10 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
       const url = new URL(req.url, 'http://127.0.0.1'), route = url.pathname;
       if (route.startsWith('/api/')) {
         const origin = req.headers.origin;
-        if (origin && ![`http://127.0.0.1:${port}`, 'http://127.0.0.1:5180', 'http://127.0.0.1:5181'].includes(origin)) throw Object.assign(new Error('不支持的请求来源'), { statusCode: 403 });
+        // Use the bound port (port: 0 selects a random port) and support both local hostnames.
+        const allowedOrigins = [server.address().port, 5180, 5181].flatMap(localPort =>
+          [`http://127.0.0.1:${localPort}`, `http://localhost:${localPort}`]);
+        if (origin && !allowedOrigins.includes(origin)) throw Object.assign(new Error('不支持的请求来源'), { statusCode: 403 });
         if (token && req.headers.authorization !== `Bearer ${token}`) throw Object.assign(new Error('未授权'), { statusCode: 401 });
       }
       let result;
@@ -40,10 +44,10 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
         clients.add(res); const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
         req.on('close', () => { clearInterval(heartbeat); clients.delete(res); }); return;
       }
-      if (route === '/api/state' && req.method === 'GET') result = { config: store.publicConfig(), sessions: store.listSessions(), knowledge: knowledge.list(), active: engine.active ? { sessionId: engine.active.sessionId, runId: engine.active.runId } : null, voice: voice.phase, version: '0.1.0', engine: 'Pi 1.4.0' };
+      if (route === '/api/state' && req.method === 'GET') result = { config: store.publicConfig(), mcpRuntime: mcp.snapshots(), sessions: store.listSessions(), knowledge: knowledge.list(), active: engine.active ? { sessionId: engine.active.sessionId, runId: engine.active.runId } : null, voice: voice.phase, version: '0.1.0', engine: 'Pi 1.4.0' };
       else if (route === '/api/settings' && req.method === 'PUT') {
         idle(); const config = await body(req); for (const flow of config.workflows || []) validateWorkflow(flow);
-        result = store.saveConfig(config); voice.cancel(); notify({ type: 'settings' });
+        store.saveConfig(config); prepareRuntimeConfig(store); await mcp.sync(); result = store.publicConfig(); voice.cancel(); notify({ type: 'settings' });
       } else if (route === '/api/sessions' && req.method === 'POST') { idle(); result = store.newSession(); }
       else if (/^\/api\/sessions\/[\w-]+$/.test(route) && req.method === 'GET') result = store.safe(store.getSession(route.split('/').at(-1)));
       else if (route === '/api/run' && req.method === 'POST') { if (voice.phase !== 'idle') throw new Error('请先结束语音输入'); const value = await body(req); result = engine.start(value.sessionId, value.text, { workflowId: value.workflowId, input: value.input }); }
@@ -58,7 +62,25 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
         const { content: _, file: __, ...metadata } = skill;
         store.saveConfig({ ...store.config, skills: [...store.config.skills, { ...metadata, id: uid(), enabled: true }] }); result = store.publicConfig().skills;
       } else if (route === '/api/skills/preview' && req.method === 'POST') { const value = await body(req), skill = store.config.skills.find(s => s.id === value.id); if (!skill) throw new Error('Skill 不存在'); result = readSkill(skill.directory); }
-      else if (route === '/api/workflows/starter' && req.method === 'POST') { idle(); const flow = { ...starterWorkflow, id: uid() }; store.saveConfig({ ...store.config, workflows: [...store.config.workflows, flow] }); result = store.publicConfig().workflows; }
+      else if (route === '/api/workflows/starter' && req.method === 'POST') { idle(); const flow = { ...starterWorkflow, id: uid() }; store.saveConfig({ ...store.config, workflows: [...store.config.workflows, flow] }); prepareRuntimeConfig(store); result = store.publicConfig().workflows; }
+      else if (route === '/api/mcp/groundstation' && req.method === 'POST') {
+        idle();
+        if (store.config.mcp.some(service => service.id === managedMcpId)) throw new Error('地面站 MCP 服务已存在');
+        store.saveConfig({ ...store.config, mcp: [...store.config.mcp, { id: managedMcpId,
+          name: store.config.mcp.some(s => s.name === 'groundstation') ? 'groundstation_tools' : 'groundstation',
+          enabled: false, transport: 'stdio', command: store.config.voice.python, args: [], env: {} }] });
+        prepareRuntimeConfig(store); result = store.publicConfig(); notify({ type: 'settings' });
+      }
+      else if (/^\/api\/mcp\/[\w-]+\/config$/.test(route) && req.method === 'GET') result = readMcpYaml(store, route.split('/')[3]);
+      else if (/^\/api\/mcp\/[\w-]+\/config$/.test(route) && req.method === 'PUT') {
+        idle(); const value = await body(req), id = route.split('/')[3]; result = await saveMcpYaml(store, id, value.yaml);
+        await mcp.restart(id); notify({ type: 'settings' });
+      }
+      else if (route === '/api/mcp/runtime' && req.method === 'GET') result = mcp.snapshots();
+      else if (/^\/api\/mcp\/[\w-]+\/(start|pause|test)$/.test(route) && req.method === 'POST') {
+        const [, , , id, operation] = route.split('/');
+        result = await mcp[operation](id); notify({ type: 'settings' });
+      }
       else if (route === '/api/diagnostics' && req.method === 'POST') {
         const value = await body(req);
         if (value.type === 'voice') result = await voice.request('probe');
@@ -66,14 +88,19 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
         else if (value.type === 'mcp') {
           const draft = mergeMasked(value.config || store.config.mcp.find(s => s.id === value.id), store.config.mcp.find(s => s.id === value.id));
           if (!draft) throw new Error('MCP 配置不存在');
-          validateSettings({ ...store.config, mcp: [draft] }); const connection = await connectMcp(draft);
-          try { result = { connected: true, tools: connection.tools }; } finally { await connection.close(); }
-        } else {
+          validateSettings({ ...store.config, mcp: [draft] });
+          const saved = store.config.mcp.find(service => service.id === value.id);
+          if (!value.config || JSON.stringify(draft) === JSON.stringify(saved)) result = await mcp.test(value.id);
+          else {
+            const connection = await connectMcp(draft);
+            try { result = { connected: true, tools: connection.tools }; } finally { await connection.close(); }
+          }
+        } else if (value.type === 'model') {
           const c = store.config;
-          const response = await fetch(value.type === 'model' ? c.model.baseUrl.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') + '/models' : c.gcs.baseUrl, { headers: value.type === 'model' && c.model.apiKey ? { Authorization: `Bearer ${c.model.apiKey}` } : {}, signal: AbortSignal.timeout(8000) });
+          const response = await fetch(c.model.baseUrl.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '') + '/models', { headers: c.model.apiKey ? { Authorization: `Bearer ${c.model.apiKey}` } : {}, signal: AbortSignal.timeout(8000) });
           if (value.type === 'model' && !response.ok) throw new Error(`模型服务返回 HTTP ${response.status}`);
-          result = { reachable: true, status: response.status, message: value.type === 'model' ? '模型服务可访问；工具调用需通过实际对话验证' : 'HTTP 服务可访问；业务契约需通过实际请求验证' };
-        }
+          result = { reachable: true, status: response.status, message: '模型服务可访问；工具调用需通过实际对话验证' };
+        } else throw new Error('未知诊断类型');
       } else if (route === '/api/voice/start' && req.method === 'POST') { idle(); result = await voice.start(); }
       else if (route === '/api/voice/devices' && req.method === 'GET') result = await voice.request('probe');
       else if (route === '/api/voice/status' && req.method === 'GET') result = { ...(await voice.request('status')), phase: voice.phase };
@@ -96,8 +123,9 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   const actualPort = server.address().port;
-  const close = async () => { voice.cancel(); await engine.stop(); for (const client of clients) client.end(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); };
-  return { server, store, engine, knowledge, port: actualPort, close };
+  void mcp.sync();
+  const close = async () => { voice.cancel(); await engine.stop(); await mcp.close(); for (const client of clients) client.end(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); };
+  return { server, store, engine, knowledge, mcp, port: actualPort, close };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await startServer();

@@ -32,10 +32,40 @@ test('bundled Python MCP resolves to runtime resources and desktop task storage'
     const store = new Store(dir);
     store.saveConfig({ ...store.config, mcp: [{ id: 'python-task-simulator', name: 'python_tasks', transport: 'stdio', enabled: true,
       command: 'old-node', args: ['D:\\old-project\\python-mcp.mjs'], env: { LH_LEGACY_PYTHON: 'python' }, headers: {} }] });
-    prepareRuntimeConfig(store, { speechRoot: path.join(dir, 'resources', 'speech'), node: path.join(dir, '领航.exe') });
-    assert.equal(store.config.mcp[0].command, path.join(dir, '领航.exe'));
-    assert.equal(store.config.mcp[0].env.ELECTRON_RUN_AS_NODE, '1');
-    assert.equal(store.config.mcp[0].env.TASK_STATE_PATH, path.join(dir, 'python-tasks', 'state.json'));
+    prepareRuntimeConfig(store, { speechRoot: path.join(dir, 'resources', 'speech') });
+    assert.equal(store.config.mcp[0].command, 'python');
+    assert.deepEqual(store.config.mcp[0].args, ['-m', 'integrations.mcp_server', '--config', path.join(dir, 'mcp', 'groundstation.yaml'), '--request-dir', path.join(dir, 'requests', 'groundstation')]);
+    assert.equal(store.config.mcp[0].env.PYTHONUTF8, '1');
+    assert.equal(store.config.mcp[0].env.LH_LEGACY_PYTHON, undefined);
+    assert.equal(store.config.mcp[0].env.LH_PROJECT_ROOT, undefined);
+    assert.equal(store.config.mcp[0].env.ELECTRON_RUN_AS_NODE, undefined);
+    assert.equal(store.config.mcp[0].env.TASK_STATE_PATH, undefined);
+    assert.match(fs.readFileSync(path.join(dir, 'mcp', 'groundstation.yaml'), 'utf8'), /18003/);
     assert.equal(store.config.mcp[0].cwd, path.join(dir, 'resources', 'speech'));
+    store.config.mcp[0].command = 'user-selected-python';
+    prepareRuntimeConfig(store, { speechRoot: path.join(dir, 'new-resources', 'speech') });
+    assert.equal(store.config.mcp[0].command, 'user-selected-python');
+    assert.equal(store.config.mcp[0].cwd, path.join(dir, 'new-resources', 'speech'));
   } finally { assert.equal(path.dirname(dir), path.resolve(os.tmpdir())); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('old ground-station settings migrate to MCP YAML and encrypted environment without losing workflows', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'linghang-gcs-migration-'));
+  try {
+    const store = new Store(dir);
+    // Simulate a previously saved configuration loaded before runtime preparation.
+    store.config.gcs = { baseUrl: 'http://station.example:18001', timeoutSeconds: 22, token: 'private-station-token' };
+    store.config.workflows = [{ id: 'old', steps: [{ id: 'create', type: 'tool', tool: 'mcp__groundstation__create_task' }] }];
+    prepareRuntimeConfig(store);
+    const text = fs.readFileSync(path.join(dir, 'mcp', 'groundstation.yaml'), 'utf8');
+    assert.match(text, /station.example:18001/);
+    assert.match(text, /simulation: false/);
+    assert.equal(text.includes('private-station-token'), false);
+    assert.equal(store.config.mcp[0].env.LH_GCS_TOKEN, 'private-station-token');
+    assert.equal(store.publicConfig().mcp[0].env.LH_GCS_TOKEN, '••••••••');
+    assert.equal(store.config.gcs, undefined);
+    fs.writeFileSync(path.join(dir, 'mcp', 'groundstation.yaml'), 'user-edited-file');
+    prepareRuntimeConfig(store);
+    assert.equal(fs.readFileSync(path.join(dir, 'mcp', 'groundstation.yaml'), 'utf8'), 'user-edited-file');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

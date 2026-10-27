@@ -6,6 +6,7 @@ __pycache__/
 docs/cankao/
 .DS_Store
 output/
+third_party/mcp-python-sdk/
 .idea/
 .vscode/
 .trae/

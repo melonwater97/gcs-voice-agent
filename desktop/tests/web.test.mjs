@@ -6,8 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
-import { chromium } from '@playwright/test';
+import { chromium, expect } from '@playwright/test';
 import { startServer } from '../server/index.mjs';
+import { prepareRuntimeConfig, saveMcpYaml } from '../server/runtime-config.mjs';
+import { httpSimulator } from './helpers/http-simulator.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -31,6 +33,12 @@ test('Web UI loads, manages settings and runs Pi tools without replaying on relo
   const app = await startServer({ port: 0, dataDir: dir });
   t.after(() => app.close());
   app.store.saveConfig({ ...app.store.config, model: { ...app.store.config.model, baseUrl: `http://127.0.0.1:${model.address().port}/v1`, model: 'local-test' } });
+  if (process.env.LH_TEST_PYTHON) {
+    const baseUrl = await httpSimulator(t, dir);
+    app.store.saveConfig({ ...app.store.config, mcp: [{ id: 'python-task-simulator', name: 'python_tasks', transport: 'stdio', enabled: false, command: process.env.LH_TEST_PYTHON, args: [], env: {} }] });
+    prepareRuntimeConfig(app.store);
+    await saveMcpYaml(app.store, 'python-task-simulator', `ground_station:\n  base_url: ${baseUrl}\n  simulation: true\n`);
+  }
   await app.knowledge.add('检查手册.md', Buffer.from('上传任务前应检查起飞高度、任务名称及编队参数。').toString('base64'));
   const vite = await createServer({ root, configFile: path.join(root, 'vite.config.mjs'), logLevel: 'error', server: { host: '127.0.0.1', port: 5181, strictPort: true, proxy: { '/api': { target: `http://127.0.0.1:${app.port}`, timeout: 0 } } } });
   await vite.listen(); t.after(() => vite.close());
@@ -42,9 +50,54 @@ test('Web UI loads, manages settings and runs Pi tools without replaying on relo
   await page.goto('http://127.0.0.1:5181/');
   await page.getByRole('heading', { name: '让想法，成为行动。' }).waitFor();
   await page.getByRole('button', { name: '设置', exact: true }).click();
-  for (const name of ['通用', '模型服务', '语音输入', '地面站', '知识库', 'MCP 服务', 'Skills', '工作流']) {
+  assert.equal(await page.getByRole('navigation').getByRole('button', { name: '地面站', exact: true }).count(), 0);
+  for (const name of ['通用', '模型服务', '语音输入', '知识库', 'MCP 服务', 'Skills', '工作流']) {
     await page.getByRole('navigation').getByRole('button', { name, exact: true }).click();
     await page.getByRole('heading', { name, exact: true }).waitFor();
+    if (name === 'MCP 服务' && process.env.LH_TEST_PYTHON) {
+      assert.equal(await page.getByRole('switch', { name: '启用 MCP python_tasks', exact: true }).count(), 0);
+      assert.equal(await page.getByRole('textbox', { name: '程序路径', exact: true }).isVisible(), false);
+      await page.getByRole('button', { name: '配置服务 python_tasks', exact: true }).click();
+      const editor = page.getByRole('textbox', { name: '服务配置 YAML', exact: true });
+      const yaml = await editor.inputValue();
+      assert.match(yaml, /simulation: true/);
+      await editor.fill('ground_station:\n  timeout_seconds: 0');
+      await page.getByRole('button', { name: '保存 YAML 配置', exact: true }).click();
+      await page.locator('.settings-footer .error-text').waitFor();
+      await editor.fill(yaml);
+      await page.getByRole('button', { name: '保存 YAML 配置', exact: true }).click();
+      await page.getByText('YAML 配置已保存，运行中的服务已重新加载。', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '关闭服务配置', exact: true }).click();
+      await page.getByRole('button', { name: '测试连接 python_tasks', exact: true }).click();
+      await page.getByText('HTTP 可达 · 模拟服务', { exact: true }).waitFor();
+      await page.getByRole('button', { name: '工具 create_task', exact: true }).waitFor();
+      assert.equal(app.mcp.snapshot('python-task-simulator').status, 'paused', 'Testing must not start a paused service permanently');
+      await page.getByRole('button', { name: '启动服务 python_tasks', exact: true }).click();
+      await page.getByRole('button', { name: '暂停服务 python_tasks', exact: true }).waitFor();
+      const pid = app.mcp.snapshot('python-task-simulator').pid;
+      assert.ok(pid);
+      await page.getByRole('button', { name: '工具 create_task', exact: true }).click();
+      const toolDetail = page.getByRole('complementary', { name: 'MCP 工具详情' });
+      await toolDetail.getByText('当前可调用', { exact: true }).waitFor();
+      await toolDetail.getByRole('button', { name: '参数', exact: true }).click();
+      await toolDetail.getByText('task', { exact: true }).waitFor();
+      await toolDetail.getByText('必填', { exact: true }).waitFor();
+      await toolDetail.getByRole('button', { name: 'Schema', exact: true }).click();
+      assert.match(await toolDetail.locator('pre').innerText(), /takeoff_altitude/);
+      await page.screenshot({ path: path.join(root, '.data', 'mcp-service-detail-preview.png'), fullPage: true });
+      await page.getByRole('button', { name: '暂停服务 python_tasks', exact: true }).click();
+      await expect(page.getByRole('button', { name: '启动服务 python_tasks', exact: true })).toBeEnabled();
+      await toolDetail.getByRole('button', { name: '概述', exact: true }).click();
+      await toolDetail.getByText('当前不可调用', { exact: true }).waitFor();
+      assert.throws(() => process.kill(pid, 0));
+      await page.getByRole('button', { name: '关闭工具详情', exact: true }).click();
+      await page.getByRole('button', { name: '收起服务 python_tasks', exact: true }).click();
+      assert.equal(await page.getByRole('button', { name: '工具 create_task', exact: true }).count(), 0);
+      await page.getByRole('button', { name: '保存设置', exact: true }).click();
+      await page.getByText('设置已保存，下一次执行生效', { exact: true }).waitFor();
+      assert.equal(app.store.config.mcp[0].enabled, false, 'Saving the settings form must not undo a pause');
+      await page.screenshot({ path: path.join(root, '.data', 'mcp-service-list-preview.png'), fullPage: true });
+    }
   }
   await page.getByRole('button', { name: '关闭', exact: true }).click();
   await page.getByRole('textbox', { name: '消息输入' }).fill('请从知识库检索上传前的检查事项');

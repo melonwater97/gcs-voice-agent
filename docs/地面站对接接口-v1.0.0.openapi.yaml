@@ -1,0 +1,851 @@
+openapi: 3.1.0
+info:
+  title: 地面站与 Agent 对接接口
+  version: 1.0.0
+  description: >-
+    按 docs/地面站对接接口.md 编写的 Qt 地面站与 Agent 接口契约。
+    Qt 任务服务的 host、port 与鉴权由部署配置提供。录音控制接口使用 Agent 服务地址。
+servers:
+  - url: /
+    description: 相对于部署时配置的 Qt 地面站 HTTP API 主机
+tags:
+  - name: 录音控制
+    description: Qt 地面站调用 Agent 服务，控制服务端录音
+  - name: 任务命令
+    description: Agent 调用 Qt 地面站任务 API
+  - name: Agent 事件
+    description: Agent 向 Qt 地面站发送 ASR、澄清及后台错误事件
+paths:
+  /api/record:
+    post:
+      tags: [录音控制]
+      summary: 开始或结束服务端录音
+      description: >-
+        由 payload.type 区分 record_start 与 record_stop。record_start 的 header.msg_id
+        同时作为本次录音的 record_id；record_stop 必须回传该 record_id。
+        record_stop 只确认录音已经提交 ASR，不代表后台处理已完成。
+      operationId: controlRecording
+      servers:
+        - url: http://127.0.0.1:18002
+          description: Agent 服务默认地址；部署时可配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordCommandEnvelope'
+            examples:
+              record_start:
+                summary: 开始录音
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                    msg_type: RECORD_COMMAND
+                    version: 1.0.0
+                    src: {type: FRONT, id: GS-01}
+                    dst: {type: BACKGROUND, id: AGENT-01}
+                  payload:
+                    type: record_start
+              record_stop:
+                summary: 结束录音并提交 ASR
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000012
+                    msg_type: RECORD_COMMAND
+                    version: 1.0.0
+                    src: {type: FRONT, id: GS-01}
+                    dst: {type: BACKGROUND, id: AGENT-01}
+                  payload:
+                    type: record_stop
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+      responses:
+        '200':
+          description: 录音控制成功；record_stop 表示 ASR 已接受音频
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentOutputEnvelope'
+              examples:
+                record_start:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000005
+                      msg_type: AGENT_OUTPUT
+                      version: 1.0.0
+                      src: {type: BACKGROUND, id: AGENT-01}
+                      dst: {type: FRONT, id: GS-01}
+                    payload:
+                      type: record_start
+                      code: 200
+                      message: 开始监听
+                record_stop:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000013
+                      msg_type: AGENT_OUTPUT
+                      version: 1.0.0
+                      src: {type: BACKGROUND, id: AGENT-01}
+                      dst: {type: FRONT, id: GS-01}
+                    payload:
+                      type: record_stop
+                      code: 200
+                      message: 录音已完成，已提交 ASR 处理
+        '400':
+          $ref: '#/components/responses/AgentError'
+        '404':
+          $ref: '#/components/responses/AgentError'
+        '405':
+          $ref: '#/components/responses/AgentError'
+        '415':
+          $ref: '#/components/responses/AgentError'
+        '422':
+          $ref: '#/components/responses/AgentError'
+        '409':
+          $ref: '#/components/responses/AgentError'
+        '500':
+          $ref: '#/components/responses/AgentError'
+        '503':
+          $ref: '#/components/responses/AgentError'
+        '504':
+          $ref: '#/components/responses/AgentError'
+
+  /api/tasks:
+    post:
+      tags: [任务命令]
+      summary: 创建、上传或执行任务
+      description: >-
+        由 payload.type 区分 create_task、upload_task、execute_task。
+        所有请求携带 record_id，等于触发本次操作的 A1 record_start 请求 msg_id。
+        Qt 对 header.src.id 与 header.msg_id 去重；重试时须重用相同信封。
+      operationId: executeTaskCommand
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCommandEnvelope'
+            examples:
+              create_task:
+                summary: 创建任务
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000021
+                    msg_type: TASK_COMMAND
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: create_task
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                    task:
+                      task_type: 放飞前出任务
+                      task_name: ''
+                      parameters: {}
+              upload_task:
+                summary: 上传任务
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000022
+                    msg_type: TASK_COMMAND
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: upload_task
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000015
+              execute_task:
+                summary: 执行任务
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000023
+                    msg_type: TASK_COMMAND
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: execute_task
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000016
+      responses:
+        '200':
+          description: 任务操作成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResultEnvelope'
+              examples:
+                create_task:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000031
+                      msg_type: TASK_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: create_task
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                      code: 200
+                      message: 任务创建成功
+                upload_task:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000032
+                      msg_type: TASK_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: upload_task
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000015
+                      code: 200
+                      message: 任务上传成功
+                execute_task:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000033
+                      msg_type: TASK_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: execute_task
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000016
+                      code: 200
+                      message: 任务执行成功
+        '400':
+          $ref: '#/components/responses/TaskError'
+        '404':
+          $ref: '#/components/responses/TaskError'
+        '405':
+          $ref: '#/components/responses/TaskError'
+        '415':
+          $ref: '#/components/responses/TaskError'
+        '409':
+          $ref: '#/components/responses/TaskError'
+        '422':
+          $ref: '#/components/responses/TaskError'
+        '500':
+          $ref: '#/components/responses/TaskError'
+        '503':
+          $ref: '#/components/responses/TaskError'
+        '504':
+          $ref: '#/components/responses/TaskError'
+
+  /api/agent/events:
+    post:
+      tags: [Agent 事件]
+      summary: 发送 ASR 文本、澄清消息或后台错误
+      description: >-
+        由 payload.type 区分 asr、clarify、processing_error。
+        record_id 关联触发本消息的录音。processing_error 请求的 payload.code
+        描述 Agent 后台失败；Qt 接收成功时，响应 payload.code 仍为 200。
+        Qt 按 header.src.id 与 header.msg_id 去重，重复消息不会重复展示。
+      operationId: sendAgentEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentEventEnvelope'
+            examples:
+              asr:
+                summary: 显示 ASR 识别文本
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000025
+                    msg_type: AGENT_EVENT
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: asr
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                    text: 新增名为晨曦的放飞前出任务，原地起飞，起飞高度50米
+              clarify:
+                summary: 显示澄清问题
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000024
+                    msg_type: AGENT_EVENT
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: clarify
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                    text: 请补充起飞高度（单位：米）。
+              processing_error:
+                summary: 通知后台处理失败
+                value:
+                  header:
+                    msg_id: MSG-550e8400-e29b-41d4-a716-000000000026
+                    msg_type: AGENT_EVENT
+                    version: 1.0.0
+                    src: {type: BACKGROUND, id: AGENT-01}
+                    dst: {type: FRONT, id: GS-01}
+                  payload:
+                    type: processing_error
+                    record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                    stage: asr
+                    code: 500
+                    message: 语音识别失败，请重新录音
+      responses:
+        '200':
+          description: Qt 已接收事件消息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEventResultEnvelope'
+              examples:
+                asr:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000035
+                      msg_type: AGENT_EVENT_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: asr
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                      code: 200
+                      message: 转写文本已接收
+                clarify:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000034
+                      msg_type: AGENT_EVENT_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: clarify
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                      code: 200
+                      message: 澄清消息已接收
+                processing_error:
+                  value:
+                    header:
+                      msg_id: MSG-550e8400-e29b-41d4-a716-000000000036
+                      msg_type: AGENT_EVENT_RESULT
+                      version: 1.0.0
+                      src: {type: FRONT, id: GS-01}
+                      dst: {type: BACKGROUND, id: AGENT-01}
+                    payload:
+                      type: processing_error
+                      record_id: MSG-550e8400-e29b-41d4-a716-000000000011
+                      code: 200
+                      message: 错误通知已接收
+        '400':
+          $ref: '#/components/responses/AgentEventError'
+        '404':
+          $ref: '#/components/responses/AgentEventError'
+        '405':
+          $ref: '#/components/responses/AgentEventError'
+        '415':
+          $ref: '#/components/responses/AgentEventError'
+        '409':
+          $ref: '#/components/responses/AgentEventError'
+        '422':
+          $ref: '#/components/responses/AgentEventError'
+        '500':
+          $ref: '#/components/responses/AgentEventError'
+        '503':
+          $ref: '#/components/responses/AgentEventError'
+        '504':
+          $ref: '#/components/responses/AgentEventError'
+
+components:
+  schemas:
+    MsgId:
+      type: string
+      pattern: '^MSG-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      example: MSG-550e8400-e29b-41d4-a716-446655440000
+    Endpoint:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [FRONT, BACKGROUND]
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+    RequestHeader:
+      type: object
+      additionalProperties: false
+      required: [msg_id, msg_type, version, src, dst]
+      properties:
+        msg_id:
+          $ref: '#/components/schemas/MsgId'
+        msg_type:
+          type: string
+          enum: [RECORD_COMMAND, TASK_COMMAND, AGENT_EVENT]
+        version:
+          const: 1.0.0
+        src:
+          $ref: '#/components/schemas/Endpoint'
+        dst:
+          $ref: '#/components/schemas/Endpoint'
+    AgentOutputHeader:
+      allOf:
+        - $ref: '#/components/schemas/ResponseHeader'
+        - type: object
+          properties:
+            msg_type:
+              const: AGENT_OUTPUT
+    TaskResultHeader:
+      allOf:
+        - $ref: '#/components/schemas/ResponseHeader'
+        - type: object
+          properties:
+            msg_type:
+              const: TASK_RESULT
+    AgentEventResultHeader:
+      allOf:
+        - $ref: '#/components/schemas/ResponseHeader'
+        - type: object
+          properties:
+            msg_type:
+              const: AGENT_EVENT_RESULT
+    ResponseHeader:
+      type: object
+      additionalProperties: false
+      required: [msg_id, msg_type, version, src, dst]
+      properties:
+        msg_id:
+          $ref: '#/components/schemas/MsgId'
+        msg_type:
+          type: string
+        version:
+          const: 1.0.0
+        src:
+          $ref: '#/components/schemas/Endpoint'
+        dst:
+          $ref: '#/components/schemas/Endpoint'
+    RecordStartCommand:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          const: record_start
+    RecordStopCommand:
+      type: object
+      additionalProperties: false
+      required: [type, record_id]
+      properties:
+        type:
+          const: record_stop
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+    RecordCommandPayload:
+      oneOf:
+        - $ref: '#/components/schemas/RecordStartCommand'
+        - $ref: '#/components/schemas/RecordStopCommand'
+      discriminator:
+        propertyName: type
+        mapping:
+          record_start: '#/components/schemas/RecordStartCommand'
+          record_stop: '#/components/schemas/RecordStopCommand'
+    RecordCommandEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          allOf:
+            - $ref: '#/components/schemas/RequestHeader'
+            - type: object
+              properties:
+                msg_type:
+                  const: RECORD_COMMAND
+        payload:
+          $ref: '#/components/schemas/RecordCommandPayload'
+    Task:
+      type: object
+      additionalProperties: false
+      required: [task_type, parameters]
+      properties:
+        task_type:
+          const: 放飞前出任务
+        task_name:
+          type: [string, 'null']
+          minLength: 0
+          maxLength: 64
+          description: 省略或为 null 时，Qt 默认生成为任务类型加 task_id 前 8 位
+        parameters:
+          oneOf:
+            - type: object
+              maxProperties: 0
+              description: 按创建任务示例留空
+            - $ref: '#/components/schemas/TakeoffInPlace'
+            - $ref: '#/components/schemas/DeployAtPosition'
+    TakeoffInPlace:
+      type: object
+      additionalProperties: false
+      required: [mode, takeoff_altitude]
+      properties:
+        mode:
+          const: 原地起飞
+        takeoff_altitude:
+          type: number
+          exclusiveMinimum: 0
+    DeployAtPosition:
+      type: object
+      additionalProperties: false
+      required: [mode, takeoff_altitude, formation]
+      properties:
+        mode:
+          const: 在指定位置展开
+        takeoff_altitude:
+          type: number
+          exclusiveMinimum: 0
+        formation:
+          oneOf:
+            - $ref: '#/components/schemas/CFormation'
+            - $ref: '#/components/schemas/UFormation'
+          discriminator:
+            propertyName: formation_type
+            mapping:
+              C型: '#/components/schemas/CFormation'
+              U型: '#/components/schemas/UFormation'
+    Position:
+      type: object
+      additionalProperties: false
+      required: [longitude, latitude]
+      properties:
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+    CFormation:
+      type: object
+      additionalProperties: false
+      required: [formation_type, open_angle, radius, position]
+      properties:
+        formation_type:
+          const: C型
+        open_angle:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 360
+        radius:
+          type: number
+          exclusiveMinimum: 0
+        position:
+          $ref: '#/components/schemas/Position'
+    UFormation:
+      type: object
+      additionalProperties: false
+      required: [formation_type, formation_length, formation_width, position]
+      properties:
+        formation_type:
+          const: U型
+        formation_length:
+          type: number
+          exclusiveMinimum: 0
+        formation_width:
+          type: number
+          exclusiveMinimum: 0
+        position:
+          $ref: '#/components/schemas/Position'
+    CreateTaskCommand:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, task]
+      properties:
+        type:
+          const: create_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        task:
+          $ref: '#/components/schemas/Task'
+    UploadTaskCommand:
+      type: object
+      additionalProperties: false
+      required: [type, record_id]
+      properties:
+        type:
+          const: upload_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+    ExecuteTaskCommand:
+      type: object
+      additionalProperties: false
+      required: [type, record_id]
+      properties:
+        type:
+          const: execute_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+    TaskCommandPayload:
+      oneOf:
+        - $ref: '#/components/schemas/CreateTaskCommand'
+        - $ref: '#/components/schemas/UploadTaskCommand'
+        - $ref: '#/components/schemas/ExecuteTaskCommand'
+      discriminator:
+        propertyName: type
+        mapping:
+          create_task: '#/components/schemas/CreateTaskCommand'
+          upload_task: '#/components/schemas/UploadTaskCommand'
+          execute_task: '#/components/schemas/ExecuteTaskCommand'
+    TaskCommandEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          allOf:
+            - $ref: '#/components/schemas/RequestHeader'
+            - type: object
+              properties:
+                msg_type:
+                  const: TASK_COMMAND
+        payload:
+          $ref: '#/components/schemas/TaskCommandPayload'
+    AsrEvent:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, text]
+      properties:
+        type:
+          const: asr
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        text:
+          type: string
+          minLength: 1
+    ClarifyEvent:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, text]
+      properties:
+        type:
+          const: clarify
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        text:
+          type: string
+          minLength: 1
+    ProcessingErrorEvent:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, stage, code, message]
+      properties:
+        type:
+          const: processing_error
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        stage:
+          type: string
+          enum: [asr, semantic, task]
+        code:
+          type: integer
+          minimum: 400
+        message:
+          type: string
+          minLength: 1
+    AgentEventPayload:
+      oneOf:
+        - $ref: '#/components/schemas/AsrEvent'
+        - $ref: '#/components/schemas/ClarifyEvent'
+        - $ref: '#/components/schemas/ProcessingErrorEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          asr: '#/components/schemas/AsrEvent'
+          clarify: '#/components/schemas/ClarifyEvent'
+          processing_error: '#/components/schemas/ProcessingErrorEvent'
+    AgentEventEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          allOf:
+            - $ref: '#/components/schemas/RequestHeader'
+            - type: object
+              properties:
+                msg_type:
+                  const: AGENT_EVENT
+        payload:
+          $ref: '#/components/schemas/AgentEventPayload'
+    RecordStartResult:
+      type: object
+      additionalProperties: false
+      required: [type, code, message]
+      properties:
+        type:
+          const: record_start
+        code:
+          const: 200
+        message:
+          const: 开始监听
+    RecordStopResult:
+      type: object
+      additionalProperties: false
+      required: [type, code, message]
+      properties:
+        type:
+          const: record_stop
+        code:
+          const: 200
+        message:
+          const: 录音已完成，已提交 ASR 处理
+    RecordControlError:
+      $ref: '#/components/schemas/ErrorPayload'
+    AgentOutputPayload:
+      oneOf:
+        - $ref: '#/components/schemas/RecordStartResult'
+        - $ref: '#/components/schemas/RecordStopResult'
+    AgentOutputEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/AgentOutputHeader'
+        payload:
+          $ref: '#/components/schemas/AgentOutputPayload'
+    TaskResultPayload:
+      oneOf:
+        - $ref: '#/components/schemas/CreateTaskResult'
+        - $ref: '#/components/schemas/UploadTaskResult'
+        - $ref: '#/components/schemas/ExecuteTaskResult'
+    CreateTaskResult:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, code, message]
+      properties:
+        type:
+          const: create_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        code:
+          const: 200
+        message:
+          type: string
+    UploadTaskResult:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, code, message]
+      properties:
+        type:
+          const: upload_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        code:
+          const: 200
+        message:
+          type: string
+    ExecuteTaskResult:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, code, message]
+      properties:
+        type:
+          const: execute_task
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        code:
+          const: 200
+        message:
+          type: string
+    TaskResultEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/TaskResultHeader'
+        payload:
+          $ref: '#/components/schemas/TaskResultPayload'
+    AgentEventResultPayload:
+      $ref: '#/components/schemas/AgentEventAccepted'
+    AgentEventAccepted:
+      type: object
+      additionalProperties: false
+      required: [type, record_id, code, message]
+      properties:
+        type:
+          type: string
+          enum: [asr, clarify, processing_error]
+        record_id:
+          $ref: '#/components/schemas/MsgId'
+        code:
+          const: 200
+        message:
+          type: string
+    AgentEventResultEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/AgentEventResultHeader'
+        payload:
+          $ref: '#/components/schemas/AgentEventResultPayload'
+    AgentErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/AgentOutputHeader'
+        payload:
+          $ref: '#/components/schemas/ErrorPayload'
+    TaskErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/TaskResultHeader'
+        payload:
+          $ref: '#/components/schemas/ErrorPayload'
+    AgentEventErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [header, payload]
+      properties:
+        header:
+          $ref: '#/components/schemas/AgentEventResultHeader'
+        payload:
+          $ref: '#/components/schemas/ErrorPayload'
+    ErrorPayload:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          minimum: 400
+        message:
+          type: string
+          minLength: 1
+  responses:
+    AgentError:
+      description: Agent 录音控制错误；payload.code 与 HTTP 状态码相同
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AgentErrorEnvelope'
+    TaskError:
+      description: Qt 任务接口错误；payload.code 与 HTTP 状态码相同
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TaskErrorEnvelope'
+    AgentEventError:
+      description: Qt 事件接口错误；payload.code 与 HTTP 状态码相同
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AgentEventErrorEnvelope'

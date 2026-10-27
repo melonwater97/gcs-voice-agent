@@ -54,7 +54,8 @@
       { "from": "../shared", "to": "speech/shared", "filter": ["*.py"] },
       { "from": "../integrations", "to": "speech/integrations", "filter": ["*.py"] },
       { "from": "../simulator", "to": "speech/simulator", "filter": ["*.py"] },
-      { "from": "../config/asr_hotwords.txt", "to": "speech/config/asr_hotwords.txt" }
+      { "from": "../config/asr_hotwords.txt", "to": "speech/config/asr_hotwords.txt" },
+      { "from": "../config/groundstation-mcp.yaml", "to": "speech/config/groundstation-mcp.yaml" }
     ],
     "win": { "target": "nsis", "artifactName": "Linghang-Assistant-Setup-${version}-${arch}.${ext}" },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "shortcutName": "领航语音助手" },

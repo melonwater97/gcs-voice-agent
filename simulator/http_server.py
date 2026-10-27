@@ -14,7 +14,6 @@ import sys
 import threading
 import time
 from copy import deepcopy
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -24,6 +23,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from shared.config import OUTPUT_DIR
@@ -33,6 +35,9 @@ PROTOCOL_VERSION = "2.0.0"
 DEDUP_RETENTION_SECONDS = 24 * 60 * 60
 DEFAULT_AGENT_ID = "AGENT-01"
 DEFAULT_STATION_ID = "GS-01"
+MAX_REQUEST_BYTES = 1_048_576
+
+
 class OperationError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -239,75 +244,53 @@ class GroundStationSimulator:
         return f"{location}: {first['msg']}" if location else first["msg"]
 
 
-def make_handler(service: GroundStationSimulator):
-    class Handler(BaseHTTPRequestHandler):
-        server_version = "GroundStationSimulator/2.0"
+def error_response(service: GroundStationSimulator, status: int,
+                   message: str) -> JSONResponse:
+    _, response = service.handle(None)
+    response["payload"] = {"code": status, "message": message}
+    return JSONResponse(status_code=status, content=response)
 
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
 
-        def do_POST(self) -> None:
-            if self.path != "/api/tasks":
-                _, response = service.handle(None)
-                response["payload"] = {"code": 404, "message": "路径不存在"}
-                self._send_json(404, response)
-                return
-            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-            if content_type != "application/json":
-                status, response = service.handle(None)
-                self._send_json(415, {"header": response["header"],
-                                      "payload": {"code": 415, "message": "Content-Type 必须为 application/json"}})
-                return
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > 1_048_576:
-                    raise ValueError("请求体为空或超过 1 MiB")
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                status, response = service.handle(None)
-                self._send_json(400, {"header": response["header"],
-                                      "payload": {"code": 400, "message": f"JSON 请求无效：{exc}"}})
-                return
-            try:
-                status, response = service.handle(body)
-                self._send_json(status, response)
-            except OSError as exc:
-                status, response = service.handle(None)
-                self._send_json(503, {"header": response["header"],
-                                      "payload": {"code": 503, "message": f"模拟服务状态保存失败：{exc}"}})
+def create_app(service: GroundStationSimulator) -> FastAPI:
+    app = FastAPI(
+        title="Ground Station Simulator",
+        version=PROTOCOL_VERSION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
-        def do_GET(self) -> None:
-            self._method_not_allowed()
+    @app.api_route("/{full_path:path}",
+                   methods=["POST", "GET", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"],
+                   include_in_schema=False)
+    async def dispatch(full_path: str, request: Request) -> JSONResponse:
+        if full_path != "api/tasks":
+            if request.method == "POST":
+                return error_response(service, 404, "路径不存在")
+            return error_response(service, 405, "仅支持 POST 方法")
 
-        def do_HEAD(self) -> None:
-            self._method_not_allowed()
+        if request.method != "POST":
+            return error_response(service, 405, "仅支持 POST 方法")
 
-        def do_PUT(self) -> None:
-            self._method_not_allowed()
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            return error_response(service, 415, "Content-Type 必须为 application/json")
 
-        def do_DELETE(self) -> None:
-            self._method_not_allowed()
+        raw = await request.body()
+        if not raw or len(raw) > MAX_REQUEST_BYTES:
+            return error_response(service, 400, "JSON 请求无效：请求体为空或超过 1 MiB")
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return error_response(service, 400, f"JSON 请求无效：{exc}")
 
-        def do_PATCH(self) -> None:
-            self._method_not_allowed()
+        try:
+            status, response = service.handle(body)
+        except OSError as exc:
+            return error_response(service, 503, f"模拟服务状态保存失败：{exc}")
+        return JSONResponse(status_code=status, content=response)
 
-        def do_OPTIONS(self) -> None:
-            self._method_not_allowed()
-
-        def _method_not_allowed(self) -> None:
-            _, response = service.handle(None)
-            response["payload"] = {"code": 405, "message": "仅支持 POST 方法"}
-            self._send_json(405, response)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            print(f"[GCS simulator] {self.address_string()} - {format % args}", file=sys.stderr)
-
-    return Handler
+    return app
 
 
 def main() -> None:
@@ -319,14 +302,8 @@ def main() -> None:
         agent_id=os.environ.get("GCS_AGENT_ID", DEFAULT_AGENT_ID),
         station_id=os.environ.get("GCS_STATION_ID", DEFAULT_STATION_ID),
     )
-    server = ThreadingHTTPServer((host, port), make_handler(service))
     print(f"地面站 HTTP 模拟服务监听 http://{host}:{port}/api/tasks", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    uvicorn.run(create_app(service), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

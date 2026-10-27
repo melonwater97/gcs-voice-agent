@@ -18,7 +18,7 @@ function migrateWebData(sourceDir, targetDir, destinationKey) {
   if (fs.existsSync(targetConfig) || !fs.existsSync(sourceConfig) || !fs.existsSync(path.join(sourceDir, 'development.key'))) return false;
   const config = decrypt(JSON.parse(fs.readFileSync(sourceConfig, 'utf8')), fs.readFileSync(path.join(sourceDir, 'development.key')));
   fs.mkdirSync(targetDir, { recursive: true });
-  for (const name of ['sessions', 'knowledge', 'requests', 'pi', 'python-tasks']) {
+  for (const name of ['sessions', 'knowledge', 'requests', 'pi', 'python-tasks', 'mcp']) {
     const source = path.join(sourceDir, name), destination = path.join(targetDir, name);
     if (fs.existsSync(source)) fs.cpSync(source, destination, { recursive: true, force: false, errorOnExist: false, filter: entry => !fs.lstatSync(entry).isSymbolicLink() });
   }

@@ -56,7 +56,7 @@ export default function App() {
         if (i < 0) records.push(event.record); else records[i] = event.record;
         return { ...old, records };
       });
-      if (event.type === 'status' || event.type === 'settings') void refresh().catch(err => setError(err.message));
+      if (event.type === 'status' || event.type === 'settings' || event.type === 'mcp_runtime') void refresh().catch(err => setError(err.message));
       if (event.type === 'reconnected') void bootstrap();
     });
     return unsub;
