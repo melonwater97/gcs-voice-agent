@@ -8,6 +8,10 @@ import { Engine } from './engine.mjs';
 import { Voice } from './voice.mjs';
 import { connectMcp } from './mcp.mjs';
 import { McpRuntime } from './mcp-runtime.mjs';
+import { FlightCoordinator } from './flight-coordinator.mjs';
+import { scenarioFor } from './scenarios.mjs';
+import { setupFlightRuntime } from './flight-runtime-config.mjs';
+import { generateFlightReport } from './flight-report.mjs';
 import { validateWorkflow, starterWorkflow } from './workflows.mjs';
 import { prepareRuntimeConfig, managedMcpId, readMcpYaml, saveMcpYaml } from './runtime-config.mjs';
 
@@ -16,7 +20,21 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
   const store = new Store(dataDir, encryptionKey), knowledge = new Knowledge(store), clients = new Set();
   prepareRuntimeConfig(store);
   const notify = event => { const line = `data: ${JSON.stringify(store.safe(event))}\n\n`; for (const client of clients) client.write(line); };
-  const mcp = new McpRuntime(store, notify), engine = new Engine(store, knowledge, notify, mcp), voice = new Voice(store);
+  const mcp = new McpRuntime(store, notify), flights = new FlightCoordinator(store, mcp, notify), engine = new Engine(store, knowledge, notify, mcp, flights), voice = new Voice(store);
+  flights.generateReport = id => generateFlightReport(flights, id);
+  const monitorJobs = new Map(), autoReports = new Set();
+  const monitor = setInterval(() => {
+    for (const flight of flights.list()) {
+      if (monitorJobs.has(flight.id) || !['monitoring', 'intervention_required', 'unknown', 'landed'].includes(flight.phase) || (flight.phase === 'landed' && autoReports.has(flight.id))) continue;
+      const job = (flight.phase === 'landed' ? Promise.resolve(flight) : flights.poll(flight.id)).then(async current => {
+        if (current.phase === 'landed' && !autoReports.has(current.id)) {
+          autoReports.add(current.id); await flights.generateReport(current.id);
+        }
+      }).catch(() => { /* State and errors are persisted for manual recovery. */ }).finally(() => monitorJobs.delete(flight.id));
+      monitorJobs.set(flight.id, job);
+    }
+  }, 3000);
+  monitor.unref();
   const idle = () => { engine.assertIdle(); if (voice.phase !== 'idle') throw Object.assign(new Error('请先结束语音输入'), { statusCode: 409 }); };
   async function body(req) {
     if (!req.headers['content-type']?.startsWith('application/json')) throw new Error('请求需要 application/json');
@@ -44,11 +62,43 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
         clients.add(res); const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
         req.on('close', () => { clearInterval(heartbeat); clients.delete(res); }); return;
       }
-      if (route === '/api/state' && req.method === 'GET') result = { config: store.publicConfig(), mcpRuntime: mcp.snapshots(), sessions: store.listSessions(), knowledge: knowledge.list(), active: engine.active ? { sessionId: engine.active.sessionId, runId: engine.active.runId } : null, voice: voice.phase, version: '0.1.0', engine: 'Pi 1.4.0' };
+      if (route === '/api/state' && req.method === 'GET') result = { config: store.publicConfig(), mcpRuntime: mcp.snapshots(), activeFlights: flights.active().map(flight => ({ id: flight.id, phase: flight.phase })), sessions: store.listSessions(), knowledge: knowledge.list(), active: engine.active ? { sessionId: engine.active.sessionId, runId: engine.active.runId } : null, voice: voice.phase, version: '0.1.0', engine: 'Pi 1.4.0' };
       else if (route === '/api/settings' && req.method === 'PUT') {
-        idle(); const config = await body(req); for (const flow of config.workflows || []) validateWorkflow(flow);
+        idle(); if (flights.active().length) throw new Error('请先结束或核对正在执行的仿真，再修改连接和约束'); const config = await body(req); for (const flow of config.workflows || []) validateWorkflow(flow);
         store.saveConfig(config); prepareRuntimeConfig(store); await mcp.sync(); result = store.publicConfig(); voice.cancel(); notify({ type: 'settings' });
+      } else if (route === '/api/scenarios/switch' && req.method === 'POST') {
+        idle(); const value = await body(req); scenarioFor(store.config, value.id);
+        if (flights.active().length) throw new Error('请先处理正在执行或待核对的仿真飞行');
+        store.saveConfig({ ...store.config, activeScenarioId: value.id }); result = store.newSession(); notify({ type: 'settings' });
       } else if (route === '/api/sessions' && req.method === 'POST') { idle(); result = store.newSession(); }
+      else if (/^\/api\/flights\/session\/[\w-]+$/.test(route) && req.method === 'GET') result = flights.forSession(route.split('/').at(-1));
+      else if (route === '/api/flights' && req.method === 'POST') { idle(); const value = await body(req); result = flights.create(store.getSession(value.sessionId), { newRun: value.newRun === true }); }
+      else if (/^\/api\/flights\/[\w-]+\/(sync|request|poll|preview)$/.test(route) && req.method === 'POST') {
+        const [, , , id, operation] = route.split('/'), value = await body(req); if (operation !== 'poll') idle();
+        if (operation === 'sync') result = await flights.sync(id);
+        if (operation === 'poll') result = await flights.poll(id);
+        if (operation === 'preview') result = await flights.preview(id, value.plan, value.expectedRevision);
+        if (operation === 'request') result = await flights.propose(id, value.action, value.payload);
+      }
+      else if (route === '/api/flight/setup' && req.method === 'POST') { idle(); result = setupFlightRuntime(store); notify({ type: 'settings' }); }
+      else if (/^\/api\/flights\/[\w-]+\/report$/.test(route) && req.method === 'POST') { idle(); result = await generateFlightReport(flights, route.split('/')[3]); }
+      else if (/^\/api\/flights\/[\w-]+\/reconcile$/.test(route) && req.method === 'POST') {
+        idle(); if (!token && !req.headers.origin) throw Object.assign(new Error('核对恢复需要界面操作'), { statusCode: 403 }); result = await flights.reconcile(route.split('/')[3]);
+      }
+      else if (/^\/api\/flights\/[\w-]+\/artifacts\/(md|docx|log)$/.test(route) && req.method === 'GET') {
+        const parts = route.split('/'), flight = flights.get(parts[3]), file = flight.report?.[parts[5]];
+        const artifactRoot = path.join(flights.dir, flight.id, 'artifacts');
+        if (!file || !path.resolve(file).startsWith(artifactRoot + path.sep) || !fs.existsSync(file)) throw new Error('报告文件尚未生成');
+        res.writeHead(200, { 'Content-Type': parts[5] === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${path.basename(file)}"` }); fs.createReadStream(file).pipe(res); return;
+      }
+      else if (/^\/api\/flights\/[\w-]+\/approvals\/[\w-]+$/.test(route) && req.method === 'POST') {
+        idle();
+        if (!token && !req.headers.origin) throw Object.assign(new Error('审批需要来自助手界面的明确操作'), { statusCode: 403 });
+        const parts = route.split('/'), value = await body(req);
+        result = await flights.decide(parts[3], parts[5], value.decision, { human: true });
+        const session = store.getSession(result.sessionId); engine.row(session, { kind: 'notice', text: `界面审批：${value.decision === 'approve' ? '批准' : '拒绝'} · ${result.approvals.find(a => a.id === parts[5])?.action}`, status: 'completed' });
+      }
       else if (/^\/api\/sessions\/[\w-]+$/.test(route) && req.method === 'GET') result = store.safe(store.getSession(route.split('/').at(-1)));
       else if (route === '/api/run' && req.method === 'POST') { if (voice.phase !== 'idle') throw new Error('请先结束语音输入'); const value = await body(req); result = engine.start(value.sessionId, value.text, { workflowId: value.workflowId, input: value.input }); }
       else if (route === '/api/stop' && req.method === 'POST') { voice.cancel(); await engine.stop(); result = { stopped: true }; }
@@ -79,6 +129,7 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
       else if (route === '/api/mcp/runtime' && req.method === 'GET') result = mcp.snapshots();
       else if (/^\/api\/mcp\/[\w-]+\/(start|pause|test)$/.test(route) && req.method === 'POST') {
         const [, , , id, operation] = route.split('/');
+        if (operation === 'pause' && flights.active().some(flight => flights.profile(flight).flight.serviceId === id)) throw new Error('该服务正在执行或监测仿真，请先人工接管并核对落地状态');
         result = await mcp[operation](id); notify({ type: 'settings' });
       }
       else if (route === '/api/diagnostics' && req.method === 'POST') {
@@ -124,8 +175,8 @@ export async function startServer({ port = Number(process.env.DESKTOP_PORT || 18
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   const actualPort = server.address().port;
   void mcp.sync();
-  const close = async () => { voice.cancel(); await engine.stop(); await mcp.close(); for (const client of clients) client.end(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); };
-  return { server, store, engine, knowledge, mcp, port: actualPort, close };
+  const close = async () => { clearInterval(monitor); voice.cancel(); await engine.stop(); await Promise.allSettled(monitorJobs.values()); await mcp.close(); for (const client of clients) client.end(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); };
+  return { server, store, engine, knowledge, mcp, flights, port: actualPort, close };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await startServer();

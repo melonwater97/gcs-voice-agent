@@ -63,7 +63,23 @@ async function createWindow() {
   const config = await backendRequest('/api/state'); win.setAlwaysOnTop(config.config.general.alwaysOnTop);
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', event => event.preventDefault());
-  win.on('close', () => { if (!win.isMaximized()) fs.writeFileSync(boundsFile, JSON.stringify(win.getBounds())); });
+  let closeAllowed = false, checkingClose = false;
+  win.on('close', event => {
+    if (closeAllowed || quitting) { if (!win.isMaximized()) fs.writeFileSync(boundsFile, JSON.stringify(win.getBounds())); return; }
+    event.preventDefault(); if (checkingClose) return; checkingClose = true;
+    void backendRequest('/api/state').then(async state => {
+      if (state.activeFlights?.length) {
+        const answer = await dialog.showMessageBox(win, { type: 'warning', buttons: ['继续监测', '已人工接管，退出助手'], defaultId: 0, cancelId: 0,
+          message: '仍有仿真正在执行或等待核对', detail: '退出助手会停止助手侧监测，不会自动让飞机悬停或落地。请先在 QGC 中处理并接管。' });
+        if (answer.response !== 1) return;
+      }
+      closeAllowed = true; win.close();
+    }).catch(async () => {
+      const answer = await dialog.showMessageBox(win, { type: 'warning', buttons: ['保留窗口', '已核对，退出'], defaultId: 0, cancelId: 0,
+        message: '无法核对助手后台状态', detail: '如果存在飞行，请先在 QGC 中确认或接管。关闭助手不会自动降落。' });
+      if (answer.response === 1) { closeAllowed = true; win.close(); }
+    }).finally(() => { checkingClose = false; });
+  });
   win.once('ready-to-show', () => win.show());
   if (process.env.LH_UI_URL) await win.loadURL(process.env.LH_UI_URL); else await win.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'));
   void watchEvents();
@@ -76,6 +92,18 @@ ipcMain.handle('backend-request', async (event, route, method, body) => {
   return result;
 });
 ipcMain.handle('pick-directory', async event => { owned(event); const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] }); return result.canceled ? null : result.filePaths[0]; });
+ipcMain.handle('download-flight-artifact', async (event, flightId, type) => {
+  owned(event);
+  if (!/^[a-f0-9-]{36}$/.test(flightId) || !['md', 'docx', 'log'].includes(type)) throw new Error('无效的报告下载请求');
+  const response = await fetch(backendURL + `/api/flights/${flightId}/artifacts/${type}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error('报告尚未生成或下载失败');
+  const filename = /filename="([a-zA-Z0-9._-]+)"/.exec(response.headers.get('content-disposition') || '')?.[1] || `flight-report.${type}`;
+  const selected = await dialog.showSaveDialog(win, { defaultPath: filename });
+  if (selected.canceled) { await response.body.cancel(); return { saved: false }; }
+  const { pipeline } = require('node:stream/promises'), { Readable } = require('node:stream');
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(selected.filePath));
+  return { saved: true };
+});
 ipcMain.on('window-command', (event, command) => { owned(event); if (command === 'minimize') win.minimize(); if (command === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize(); if (command === 'close') win.close(); });
 app.whenReady().then(createWindow).catch(error => {
   const message = '领航启动失败：' + error.message;

@@ -10,6 +10,7 @@ import { chromium, expect } from '@playwright/test';
 import { startServer } from '../server/index.mjs';
 import { prepareRuntimeConfig, saveMcpYaml } from '../server/runtime-config.mjs';
 import { httpSimulator } from './helpers/http-simulator.mjs';
+import { flightFixture } from './helpers/flight-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -20,7 +21,8 @@ test('Web UI loads, manages settings and runs Pi tools without replaying on relo
     let raw = ''; for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw); requests.push(body);
     const hasToolResult = body.messages.some(message => message.role === 'tool');
-    const delta = hasToolResult
+    const flightMode = body.tools?.some(tool => tool.function.name === 'flight_request_action');
+    const delta = flightMode ? (hasToolResult ? { role: 'assistant', content: '已创建上传审批，请在界面确认。' } : { role: 'assistant', tool_calls: [{ index: 0, id: 'flight-request', type: 'function', function: { name: 'flight_request_action', arguments: '{"action":"upload"}' } }] }) : hasToolResult
       ? { role: 'assistant', content: '已检索到资料，上传前需检查起飞高度。' }
       : { role: 'assistant', tool_calls: [{ index: 0, id: 'call_knowledge', type: 'function', function: { name: 'knowledge_search', arguments: '{"query":"上传 起飞高度"}' } }] };
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -182,6 +184,32 @@ test('Web UI loads, manages settings and runs Pi tools without replaying on relo
   app.engine.row(history, { kind: 'notice', text: '新增记录不打断历史阅读', status: 'completed' });
   await page.waitForFunction(() => document.querySelector('.trace-count').textContent.includes('4,501'));
   assert.equal(await ledger.evaluate(el => el.scrollTop), 350);
+  const fixture = flightFixture(app.store);
+  app.flights.backend = fixture.backend;
+  await page.getByRole('combobox', { name: '当前场景' }).selectOption('px4-simulation');
+  await page.getByRole('region', { name: '仿真飞行流程' }).waitFor();
+  await page.getByRole('button', { name: '对话', exact: true }).click();
+  await page.getByRole('textbox', { name: '消息输入' }).fill('准备上传当前仿真航线');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await page.getByText('已创建上传审批，请在界面确认。', { exact: true }).waitFor();
+  const approval = page.getByRole('generic', { name: '待批准飞行操作' });
+  await page.getByRole('button', { name: '批准：上传当前航线', exact: true }).waitFor();
+  assert.equal(fixture.state.writes.length, 0, 'The model cannot approve the action it requested');
+  await page.getByRole('button', { name: '拒绝，继续修改', exact: true }).click();
+  await expect(page.getByRole('button', { name: '请求上传航线', exact: true })).toBeEnabled();
+  assert.equal(fixture.state.writes.length, 0);
+  await page.getByRole('button', { name: '请求上传航线', exact: true }).click();
+  await page.getByRole('button', { name: '批准：上传当前航线', exact: true }).click();
+  await expect(page.getByRole('button', { name: '请求启动任务', exact: true })).toBeEnabled();
+  assert.equal(fixture.state.writes.length, 1);
+  await page.getByRole('button', { name: '请求启动任务', exact: true }).click();
+  await page.getByRole('button', { name: '批准：解锁并启动任务（结束后返航落地）', exact: true }).waitFor();
+  assert.equal(fixture.state.writes.length, 1, 'An upload approval never approves starting');
+  await page.screenshot({ path: path.join(root, '.data', 'flight-approval-preview.png'), fullPage: true });
+  await page.getByRole('button', { name: '批准：解锁并启动任务（结束后返航落地）', exact: true }).click();
+  await page.getByText('仿真飞行 · 执行与监测', { exact: true }).waitFor();
+  assert.equal(fixture.state.writes.length, 2);
+
   assert.deepEqual(errors, []);
   await page.screenshot({ path: path.join(root, '.data', 'trajectory-preview.png'), fullPage: true });
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

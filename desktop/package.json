@@ -47,7 +47,7 @@
     "asar": true,
     "asarUnpack": ["node_modules/@earendil-works/**", "node_modules/@silvia-odwyer/**"],
     "directories": { "output": "release" },
-    "files": ["dist/**", "electron/**", "server/**", "package.json"],
+    "files": ["dist/**", "electron/**", "server/**", "resources/**", "package.json"],
     "extraResources": [
       { "from": "python", "to": "speech/python" },
       { "from": "../inputs", "to": "speech/inputs", "filter": ["*.py"] },

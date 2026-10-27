@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import { connectMcp } from './mcp.mjs';
 import { atomicJSON, readJSON } from './store.mjs';
 import { managedMcpId, probeMcpHttp } from './runtime-config.mjs';
+import { flightAuthority, protectedFlightTools } from './flight-policy.mjs';
 
 const ajv = new Ajv({ strict: false, allErrors: true });
 const fingerprint = ({ enabled: _enabled, ...connection }) => JSON.stringify(connection);
@@ -30,7 +31,7 @@ export class McpRuntime {
   }
   snapshot(id) {
     const entry = this.entry(id);
-    return this.store.safe({ id, status: entry.status, tools: entry.tools, toolCount: entry.tools.length,
+    return this.store.safe({ id, status: entry.status, tools: entry.tools.map(tool => ({ ...tool, approvalRequired: protectedFlightTools.has(tool.name) })), toolCount: entry.tools.length,
       pid: entry.connection?.pid || null, activeCalls: entry.activeCalls, error: entry.error || '',
       startedAt: entry.startedAt, lastTestAt: entry.lastTestAt, testError: entry.testError || '', http: entry.http || null });
   }
@@ -127,13 +128,24 @@ export class McpRuntime {
         const tools = temporary ? connection.tools : await connection.listTools();
         this.remember(entry, tools); entry.testError = ''; entry.lastTestAt = Date.now();
         entry.http = id === managedMcpId ? await probeMcpHttp(this.store, id) : null;
-        return { connected: true, tools, http: entry.http };
+        let vehicle = null, vehicleError = null;
+        const data = result => { if (result.structuredContent) return result.structuredContent; try { return JSON.parse(result.content?.find(item => item.type === 'text')?.text || 'null'); } catch { return null; } };
+        if (id === 'px4-simulation') {
+          const status = await connection.client.callTool({ name: 'query_status', arguments: {} }, undefined, { timeout: 12000 });
+          if (!status.isError) vehicle = data(status);
+          else vehicleError = status.content?.map(item => item.text || '').join('\n');
+          const snapshot = await connection.client.callTool({ name: 'qgc_snapshot', arguments: {} }, undefined, { timeout: 12000 });
+          entry.http = { reachable: !snapshot.isError && data(snapshot)?.connected === true, message: snapshot.isError ? 'QGC 草稿桥未就绪' : 'QGC 草稿桥可达', simulation: true };
+        }
+        entry.simulationError = vehicleError;
+        return { connected: true, tools, http: entry.http, vehicle, vehicleError };
       } catch (error) { entry.testError = this.store.safe(error.message); entry.lastTestAt = Date.now(); throw error; }
       finally { if (temporary) await temporary.close(); entry.testing = null; this.changed(); }
     })();
     return entry.testing;
   }
-  async call(id, name, args, { signal, timeout = 120000, onProgress } = {}) {
+  async call(id, name, args, { signal, timeout = 120000, onProgress, authority } = {}) {
+    if (protectedFlightTools.has(name) && authority !== flightAuthority) throw new Error('飞行执行只能由界面审批入口授权');
     const config = this.config(id), entry = this.entry(id);
     if (!config.enabled || entry.status !== 'running' || !entry.connection) throw new Error('MCP 服务已暂停或未连接，请先启动服务');
     const tool = entry.tools.find(item => item.name === name);
@@ -150,10 +162,10 @@ export class McpRuntime {
       this.changed();
     }
   }
-  async piTools() {
+  async piTools(allowedIds = null) {
     await this.sync();
-    return this.store.config.mcp.filter(service => service.enabled && this.entry(service.id).status === 'running').flatMap(service =>
-      this.entry(service.id).tools.map(tool => ({
+    return this.store.config.mcp.filter(service => service.id !== 'px4-simulation' && service.enabled && (allowedIds === null || allowedIds.includes(service.id)) && this.entry(service.id).status === 'running').flatMap(service =>
+      this.entry(service.id).tools.filter(tool => !protectedFlightTools.has(tool.name)).map(tool => ({
         name: `mcp__${service.name}__${tool.name}`, label: `${service.name}/${tool.name}`,
         description: tool.description || tool.title || tool.name,
         parameters: { ...tool.inputSchema, type: tool.inputSchema.type || 'object', properties: tool.inputSchema.properties || {} },

@@ -7,6 +7,9 @@ docs/cankao/
 .DS_Store
 output/
 third_party/mcp-python-sdk/
+third_party/qgroundcontrol/
+uav/.venv-wsl/
+aqtinstall.log
 .idea/
 .vscode/
 .trae/

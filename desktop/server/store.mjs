@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { defaultScenarios, validateScenarios } from './scenarios.mjs';
 
 export const uid = () => randomUUID();
 export const MASK = '••••••••';
@@ -8,6 +9,7 @@ export const defaults = () => ({
   model: { baseUrl: 'http://127.0.0.1:18000/v1', model: 'Ornith-1.5-35B-A3B-MLX-6bit', apiKey: '', contextWindow: 32768, maxTokens: 4096 },
   voice: { python: 'python', modelDir: '', hotwordsFile: '', device: '', maxSeconds: 90 },
   mcp: [], skills: [], workflows: [], general: { alwaysOnTop: false },
+  scenarios: defaultScenarios(), activeScenarioId: 'groundstation',
 });
 export function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -35,6 +37,7 @@ export function mergeMasked(incoming, previous) {
 export function validateSettings(config) {
   if (!config?.model || !config?.voice || !config?.general) throw new Error('配置结构不完整');
   delete config.gcs;
+  validateScenarios(config);
   for (const [label, raw] of [['模型', config.model.baseUrl]]) {
     const url = new URL(raw);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error(`${label}地址必须为 HTTP(S)，凭据请单独填写`);
@@ -117,7 +120,7 @@ export class Store {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('会话编号无效');
     return path.join(this.dir, 'sessions', `${id}.json`);
   }
-  newSession() { const s = { id: uid(), title: '新对话', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), records: [] }; this.saveSession(s); return s; }
+  newSession() { const s = { id: uid(), scenarioId: this.config.activeScenarioId, title: '新对话', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), records: [] }; this.saveSession(s); return s; }
   getSession(id) { const s = readJSON(this.sessionPath(id), null); if (!s) throw new Error('会话不存在'); return s; }
   saveSession(s) { s.updatedAt = new Date().toISOString(); atomicJSON(this.sessionPath(s.id), s); }
   listSessions() {
