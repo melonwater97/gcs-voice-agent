@@ -14,16 +14,48 @@ from shared.contracts import Task, UploadTaskResult, ExecuteTaskResult, can_tran
 class TaskStore:
     """本次 MCP 会话的草稿、模拟上传与执行状态；上传文件保存在 Agent 侧。"""
 
-    def __init__(self, output_dir: Path = OUTPUT_DIR):
+    def __init__(self, output_dir: Path = OUTPUT_DIR, state_path: Path | None = None):
         self.output_dir = output_dir.expanduser().resolve()
+        self.state_path = state_path.expanduser().resolve() if state_path else None
         self._entries: dict[str, dict] = {}
         self._lock = RLock()
+        if self.state_path and self.state_path.exists():
+            saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if saved.get("version") != 1:
+                raise ValueError("不支持的任务模拟状态版本")
+            for task_id, entry in saved["tasks"].items():
+                if entry["status"] not in {"draft", "uploaded", "executing", "completed", "aborted"}:
+                    raise ValueError("任务模拟状态无效")
+                self._entries[task_id] = {
+                    "task": TypeAdapter(Task).validate_python(entry["task"]),
+                    "status": entry["status"],
+                }
+
+    def _persist(self) -> None:
+        if self.state_path is None:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.state_path.with_name(f".{self.state_path.name}.{uuid4().hex}.tmp")
+        content = {"version": 1, "tasks": {
+            task_id: {"task": entry["task"].model_dump(), "status": entry["status"]}
+            for task_id, entry in self._entries.items()
+        }}
+        try:
+            temporary.write_text(json.dumps(content, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            temporary.replace(self.state_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def create(self, task) -> str:
         task = TypeAdapter(Task).validate_python(task)
         task_id = f"TASK-{uuid4().hex}"
         with self._lock:
             self._entries[task_id] = {"task": named_task(task, task_id), "status": "draft"}
+            try:
+                self._persist()
+            except OSError:
+                self._entries.pop(task_id)
+                raise
         return task_id
 
     def entry(self, task_id: str) -> dict:
@@ -40,7 +72,13 @@ class TaskStore:
 
     def mark(self, task_id: str, status: str) -> None:
         self.require_transition(task_id, status)
+        previous = self.entry(task_id)["status"]
         self.entry(task_id)["status"] = status
+        try:
+            self._persist()
+        except OSError:
+            self.entry(task_id)["status"] = previous
+            raise
 
     def upload(self, task_id: str) -> dict:
         with self._lock:
@@ -60,7 +98,11 @@ class TaskStore:
             except OSError:
                 path.unlink(missing_ok=True)
                 raise
-            self.mark(task_id, "uploaded")
+            try:
+                self.mark(task_id, "uploaded")
+            except OSError:
+                path.unlink(missing_ok=True)
+                raise
             return result
 
     def execute(self, task_id: str) -> dict:

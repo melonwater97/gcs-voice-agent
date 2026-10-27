@@ -13,8 +13,8 @@ from shared.messages import MCP, make_message, check_route
 from simulator.backend import TaskStore
 
 
-def create_server(task_output_dir: Path = OUTPUT_DIR) -> MCPServer:
-    tasks = TaskStore(task_output_dir)
+def create_server(task_output_dir: Path = OUTPUT_DIR, task_state_path: Path | None = None) -> MCPServer:
+    tasks = TaskStore(task_output_dir, state_path=task_state_path)
     server = MCPServer("task-simulator")
 
     def invoke(header, action, operation):
@@ -62,7 +62,9 @@ def create_server(task_output_dir: Path = OUTPUT_DIR) -> MCPServer:
 
 
 def main() -> None:
-    create_server(Path(os.environ.get("TASK_OUTPUT_DIR", str(OUTPUT_DIR)))).run(transport="stdio")
+    state_path = os.environ.get("TASK_STATE_PATH")
+    create_server(Path(os.environ.get("TASK_OUTPUT_DIR", str(OUTPUT_DIR))),
+                  Path(state_path) if state_path else None).run(transport="stdio")
 
 
 if __name__ == "__main__":

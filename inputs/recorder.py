@@ -18,9 +18,10 @@ MIN_SECONDS = 0.25
 class MicRecorder:
     """16000Hz 单声道 float32 录音；回调在 PortAudio 线程写状态，snapshot/finish 读。"""
 
-    def __init__(self, max_seconds: int = 90, sample_rate: int = 16000):
+    def __init__(self, max_seconds: int = 90, sample_rate: int = 16000, device: int | None = None):
         self.max_seconds = max_seconds
         self.sample_rate = sample_rate
+        self.device = device
         self._lock = threading.Lock()
         self._stream = None
         self._timer = None
@@ -45,7 +46,7 @@ class MicRecorder:
         try:
             # 回调在独立音频线程执行；start() 仅在打开设备时短暂阻塞。
             stream = sd.InputStream(samplerate=self.sample_rate, channels=1,
-                                    dtype="float32", callback=self._on_audio)
+                                    dtype="float32", device=self.device, callback=self._on_audio)
             stream.start()
         except Exception as exc:
             raise ValueError(f"无法打开麦克风：{exc}") from exc
@@ -142,6 +143,6 @@ def _close_stream(stream) -> None:
         print(f"[录音] 关闭音频流异常：{exc}", flush=True)
 
 
-def create_recorder(max_seconds: int = 90) -> MicRecorder:
+def create_recorder(max_seconds: int = 90, device: int | None = None) -> MicRecorder:
     """录音器工厂：Agent 与测试用它注入不同实现。"""
-    return MicRecorder(max_seconds=max_seconds)
+    return MicRecorder(max_seconds=max_seconds, device=device)

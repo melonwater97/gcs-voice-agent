@@ -1,0 +1,63 @@
+{
+  "name": "linghang-assistant",
+  "productName": "领航语音助手",
+  "description": "Pi 驱动的独立语音助手",
+  "author": "LK",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "node scripts/dev.mjs --web",
+    "dev:electron": "node scripts/dev.mjs --electron",
+    "serve": "node server/index.mjs",
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "start:electron": "electron .",
+    "test:web": "node --test tests/web.test.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "package:win": "npm run build && electron-builder --win nsis --x64",
+    "package:portable": "npm run build && electron-builder --win portable --x64",
+    "package:dir": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "ajv": "^8.17.1",
+    "lucide-react": "0.468.0",
+    "pdfjs-dist": "5.4.149",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typebox": "1.3.27",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.0",
+    "@vitejs/plugin-react": "4.7.0",
+    "electron": "44.0.0",
+    "electron-builder": "26.15.3",
+    "vite": "6.4.0"
+  },
+  "build": {
+    "appId": "cn.lk.linghang-assistant",
+    "productName": "领航语音助手",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "asarUnpack": ["node_modules/@earendil-works/**", "node_modules/@silvia-odwyer/**"],
+    "directories": { "output": "release" },
+    "files": ["dist/**", "electron/**", "server/**", "package.json"],
+    "extraResources": [
+      { "from": "python", "to": "speech/python" },
+      { "from": "../inputs", "to": "speech/inputs", "filter": ["*.py"] },
+      { "from": "../shared", "to": "speech/shared", "filter": ["*.py"] },
+      { "from": "../integrations", "to": "speech/integrations", "filter": ["*.py"] },
+      { "from": "../simulator", "to": "speech/simulator", "filter": ["*.py"] },
+      { "from": "../config/asr_hotwords.txt", "to": "speech/config/asr_hotwords.txt" }
+    ],
+    "win": { "target": "nsis", "artifactName": "Linghang-Assistant-Setup-${version}-${arch}.${ext}" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "shortcutName": "领航语音助手" },
+    "portable": { "artifactName": "Linghang-Assistant-Portable-${version}-${arch}.${ext}", "requestExecutionLevel": "user", "unpackDirName": true }
+  }
+}

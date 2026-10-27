@@ -1,5 +1,11 @@
 # 本地语音地面站助手
 
+**2026-10-26 对接方案调整**：后续采用独立语音助手界面，助手自行控制录音和对话，助手侧 MCP 工具通过 HTTP 调用地面站业务服务。新的双方职责与接口草案见 [地面站对接接口 v2.0.0](docs/地面站对接接口.md)。本仓库提供独立的地面站 HTTP 模拟服务；语音助手到真实地面站的 HTTP 适配尚未实现。
+
+独立桌面助手的产品范围与实施建议见 [PRD 0.1](docs/独立语音助手PRD.md)，内核比较见 [Pi 与 DSH 选型建议](docs/Agent内核选型-Pi与DSH.md)。
+
+独立助手初版位于 [`desktop/`](desktop/README.md)，当前优先使用 **Web 模式**：在该目录执行 `npm run dev`，打开 [本地助手](http://127.0.0.1:5180/)。包含 Pi 1.4.0、工具轨迹、语音、知识库、MCP、Skills 和顺序工作流。
+
 统一流程：`React 地面站 → Agent（ASR / LLM / 参数校验）→ MCP 本地任务模拟 → Agent 返回结果 → React 展示`。
 
 React 界面就是地面站，直接请求 Agent，没有独立的地面站业务后端。Agent 负责 ASR、LLM 和 MCP，任务创建、保存与模拟执行在 Agent 侧完成，结果和参数状态返回界面。支持放飞前出任务和 C/U 型编队。LLM 后端可替换：默认指向本机 oMLX/Ornith，也可用 `--url` + `--model` 指向任何 OpenAI 兼容且支持工具调用的服务（本机 llama.cpp、Ollama、DeepSeek 等，见下文）。当前只做模拟，不连接真实飞控。
@@ -79,7 +85,17 @@ python main.py assistant --mic
 
 ## React 模拟地面站
 
-地面站开发与联调请使用 [地面站对接接口文档](docs/地面站对接接口.md)，只描述 React 与 Agent 的服务端录音接口（A5–A7）。语音/文字输入、任务状态、健康诊断与内部工具契约见 [接口设计](docs/接口设计.md)。
+真实地面站开发与联调请使用 [地面站对接接口文档](docs/地面站对接接口.md)，描述独立语音助手侧 MCP 工具调用地面站 HTTP 业务服务的新方案。以下 React 界面仍是当前本地模拟实现，可作为独立助手界面的改造基础；现有语音/文字输入、任务状态、健康诊断与内部工具契约见 [接口设计](docs/接口设计.md)。
+
+### 地面站 HTTP 接口模拟服务
+
+`simulator/http_server.py` 按接口文档 v2.0.0 提供 `POST /api/tasks`，用 `payload.type` 分别执行 `create_task`、`upload_task`、`execute_task`。它持久化任务状态和至少 24 小时的请求去重回执，可独立于 Agent 运行；默认监听 `127.0.0.1:18003`：
+
+```sh
+python -m simulator.http_server
+```
+
+使用 `GCS_SIM_HOST`、`GCS_SIM_PORT`、`GCS_SIM_STATE_PATH` 配置监听地址、端口和状态文件；使用 `GCS_AGENT_ID`、`GCS_STATION_ID` 配置请求/响应端点编号。默认状态文件为 `output/gcs_simulator_state.json`。当前助手 MCP 工具仍直接调用本地 `TaskStore`，不会自动请求这个 HTTP 模拟服务。
 
 React 位于 `web/`，使用 React + Vite，需要 Node.js 22 或更高版本。先按上文启动模型服务，再在项目根目录启动 Agent（非默认后端同样用 `--url` + `--model`）：
 
@@ -97,7 +113,7 @@ npm run dev
 
 打开 [本地地面站](http://127.0.0.1:5173/)。Vite 仅提供前端资源，将 `/api/*`、`/health` 请求直接代理到 Agent；不接收任务上传、保存任务或执行任务。更换 Agent 地址时使用 `AGENT_URL=http://目标地址:端口 npm run dev`。构建和本地预览可用 `npm run build`、`npm run preview`，预览使用相同代理规则；部署静态页面时也需将这些路径路由到 Agent。
 
-不再需要 `python main.py gcs`、`18001` 端口或 MCP 到地面站的 HTTP 回调。`simulator/backend.py` 现在只是 MCP 调用的本地任务模拟模块。上传将任务写入 Agent 侧的 `output/TASK-*.json`，成功后更新为已上传；可用 `python main.py web --task-output-dir /绝对路径/任务目录` 修改保存位置，CLI 助手也支持该选项。执行只更新模拟状态。
+React 界面仍不需要 `python main.py gcs` 或 `18001` 端口，且不会调用独立 HTTP 模拟服务。`simulator/backend.py` 是 MCP 使用的本地任务模拟模块：上传将任务写入 Agent 侧的 `output/TASK-*.json`，成功后更新为已上传；可用 `python main.py web --task-output-dir /绝对路径/任务目录` 修改保存位置，CLI 助手也支持该选项。执行只更新模拟状态。
 
 接口统一使用 **`header + payload` JSON**，消息编号为 **`MSG-<UUID>`**，header 包含 msg_id、msg_type、version、src、dst。Agent 对地面站的所有响应统一使用 `msg_type: "AGENT_OUTPUT"`，响应种类由 `payload.type` 区分（`asr`、`task_result`、`clarify`、`error`、`state`、`health`、`record_start`、`record_status`）；错误信息在 `payload.message`。语音也使用 JSON，完整 WAV 文件经 Base64 编码放入 payload.audio_base64，payload.audio_format 为 wav；不再直接发送音频字节。文本放在 payload.text；请求与响应的对应关系由 HTTP 请求/响应本身确定，信封不再放关联编号，也不使用 X-Msg-Id。接口均为 POST：/api/voice、/api/text、/api/record、/api/record/status、/api/state、/health；录音控制通过 /api/record 的 `payload.type` 选择 `record_start` 或 `record_stop`，其余请求按接口定义携带 payload。成功和错误响应都使用同一信封。操作 payload 只含本次结果，完整任务列表和变化记录通过 /api/state 查询。内部 MCP 工具的业务参数和结果也采用该格式，MCP JSON-RPC 与模型提供方协议保持其标准格式。完整字段与示例见上述两份接口文档。
 
@@ -128,7 +144,7 @@ npx playwright test
 - `inference/`：模型接口、本地推理及任务提示词。
 - `assistant/`：会话编排、工具白名单、参数与结果校验。
 - `integrations/`：Agent 的 MCP 客户端与工具服务。
-- `simulator/`：MCP 使用的本地任务存储、文件保存与模拟状态流转。
+- `simulator/`：MCP 使用的本地任务模拟，以及独立的地面站 HTTP 协议模拟服务。
 - `shared/`：共享业务契约、消息编号、运行配置与终端输出。
 - `agent/`：浏览器调用的 ASR、Agent 和任务状态 HTTP 接口。
 - `web/`：React 地面站界面、录音与任务监控，直接调用 Agent。
