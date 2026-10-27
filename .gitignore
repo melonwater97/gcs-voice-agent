@@ -13,3 +13,12 @@ third_party/mcp-python-sdk/
 ~$*
 *.dtmp
 *.bkp
+
+# 文档临时产物（不作为源码跟踪）
+docs/.obsidian/
+docs/未命名.*
+docs/地面站接口设计261020/
+docs/*.zip
+
+# 无人机联动：仿真产物
+uav/out/
